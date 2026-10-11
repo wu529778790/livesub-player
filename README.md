@@ -1,6 +1,6 @@
 # LiveSub-Player
 
-> 打开视频，字幕跟上。macOS 桌面播放器：本地实时语音识别 + 双语字幕，安装包约 30 MB。
+> **视频没字幕？边看边自动生成。** LiveSub-Player 根据视频音频实时生成字幕：本地语音识别、双语翻译、一键导出 SRT，安装包约 30 MB。
 
 [![build](https://github.com/wu529778790/livesub-player/actions/workflows/build.yml/badge.svg)](https://github.com/wu529778790/livesub-player/actions/workflows/build.yml)
 [![release](https://github.com/wu529778790/livesub-player/actions/workflows/release.yml/badge.svg)](https://github.com/wu529778790/livesub-player/releases)

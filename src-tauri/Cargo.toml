@@ -1,7 +1,7 @@
 [package]
 name = "livesub-player"
 version = "1.0.0"
-description = "打开视频，字幕跟上。跨平台桌面播放器，实时双语字幕，全离线运行。"
+description = "视频没字幕？边看边自动生成。根据音频实时生成字幕的桌面播放器：本地语音识别、双语翻译、一键导出 SRT。"
 edition = "2021"
 default-run = "livesub-player"
 

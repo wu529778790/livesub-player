@@ -211,7 +211,8 @@
             <rect x="427" y="708" width="170" height="32" rx="16" fill="#ffd479" />
           </svg>
           <h1 class="welcome-title">LiveSub-Player</h1>
-          <p class="welcome-tagline">AI 实时语音识别字幕 · 双语翻译播放器</p>
+          <p class="welcome-tagline">视频没字幕？边看边自动生成</p>
+          <p class="welcome-sub">本地语音识别 · 实时双语翻译 · 一键导出 SRT</p>
         </div>
 
         <button class="dropzone" :class="{ hot: dragHover }" @click="openFile">
@@ -1667,7 +1668,13 @@ onMounted(async () => {
 
 .welcome-tagline {
   margin: 6px 0 0;
-  font-size: 13px;
+  font-size: 14px;
+  color: #e8e8ee;
+}
+
+.welcome-sub {
+  margin: 5px 0 0;
+  font-size: 12px;
   color: #8f8f9a;
 }
 
