@@ -411,7 +411,7 @@
         aria-label="音量"
         @input="changeVolume"
       />
-      <button class="ctl-btn" title="播放列表（菜单 文件 → 播放列表）" aria-label="播放列表" @click="togglePlaylist">
+      <button class="ctl-btn" :title="isMac ? '播放列表（菜单 文件 → 播放列表）' : '播放列表'" aria-label="播放列表" @click="togglePlaylist">
         <svg viewBox="0 0 24 24"><path d="M3 6h13v2H3zM3 12h13v2H3zM3 18h9v2H3zM15.5 13.5l6 3.5-6 3.5z" /></svg>
       </button>
       <button class="ctl-btn" title="设置" aria-label="设置" @click="settingsOpen = true; playlistOpen = false">
@@ -466,7 +466,7 @@
         <div class="modal" role="dialog" aria-modal="true" aria-label="安装 ffmpeg">
           <p class="modal-title">还差一步：安装 ffmpeg</p>
           <p class="modal-text">字幕识别依赖 ffmpeg（播放不依赖）。<br />在终端执行下面的命令后重启本应用：</p>
-          <code class="modal-code">brew install ffmpeg</code>
+          <code class="modal-code">{{ isMac ? "brew install ffmpeg" : "winget install Gyan.FFmpeg" }}</code>
           <div class="modal-actions">
             <button class="btn" @click="copyFfmpegHint">复制安装命令</button>
             <button class="btn ghost" @click="showFfmpegModal = false">知道了</button>
@@ -503,6 +503,7 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 const VIDEO_EXTS = ["mp4", "mkv", "avi", "mov", "webm", "m4v", "ts", "flv", "wmv", "rmvb"];
 
 const SPEED_PRESETS = [0.5, 0.75, 1, 1.25, 1.5, 2];
+const isMac = navigator.userAgent.includes("Mac");
 
 const filename = ref("");
 const videoPath = ref(""); // 完整路径：导出字幕时默认同目录同名
@@ -964,6 +965,10 @@ onMounted(async () => {
     dl.value = null;
     lastProg = null;
     needLocalModel.value = false;
+    // Windows 播放内核装好：自动打开上次因内核缺失而失败的视频
+    if (e.payload.name === "player-mpv" && videoPath.value && !loaded.value) {
+      void loadVideo(videoPath.value);
+    }
     // 识别模型就位：「未找到识别模型」的前提已消失，过时错误立即撤下
     if (e.payload.name.startsWith("whisper")) asrError.value = "";
     await refreshModelStatus();
@@ -1344,7 +1349,7 @@ async function openUrl(url: string) {
 
 function copyFfmpegHint() {
   navigator.clipboard
-    .writeText("brew install ffmpeg")
+    .writeText(isMac ? "brew install ffmpeg" : "winget install Gyan.FFmpeg")
     .then(() => showToast("已复制，粘贴到终端执行后重启应用"))
     .catch(() => showError("复制失败，请手动输入：brew install ffmpeg"));
 }
@@ -1683,9 +1688,14 @@ async function loadVideo(path: string) {
     // 字幕库/续播在时长可知后由 onMediaReady 接管；回放记忆的音量倍速
     void applyPersistedPlayer();
   } catch (e) {
-    // 同步失败（mpv 初始化/loadfile 被拒）：停在欢迎页并给出可见报错
+    // 同步失败（mpv 初始化/loadfile 被拒/内核缺失）：停在欢迎页并给出可见报错
     status.value = "";
-    showError(String(e));
+    const msg = String(e);
+    if (msg.includes("播放内核")) {
+      // Windows：libmpv 未装 → 自动进下载队列，完成后由 models://done 触发重开
+      void invoke("cmd_model_download", { name: "player-mpv" }).catch(() => {});
+    }
+    showError(msg);
   }
 }
 

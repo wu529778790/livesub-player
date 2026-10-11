@@ -179,3 +179,49 @@ jobs:
                 gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/$id" || true
                 gh api -X DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/$tag" || true
               done
+
+  # Windows 安装包（NSIS）：libmpv 动态加载方案落地后接入。
+  # 更新清单 latest.json 暂只含 macOS——Windows 的 updater 接入等真机验证后再并。
+  build-windows:
+    needs: build
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: 安装前端依赖
+        run: npm install
+
+      # bundle targets "all" → Windows 上自动出 NSIS 安装包
+      - name: 构建 Windows 安装包（NSIS）
+        run: npm run tauri -- build
+
+      - name: 打自动更新签名
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          cd src-tauri/target/release/bundle/nsis
+          SETUP=$(ls LiveSub-Player_*-setup.exe | head -1)
+          npm run tauri -- signer sign -k "$TAURI_SIGNING_PRIVATE_KEY" \
+            --app-version "${GITHUB_REF_NAME#v}" "$SETUP"
+          ls -l "$SETUP"*
+
+      - name: 上传 Windows 安装包
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$GITHUB_REF_NAME" --draft --title "LiveSub-Player ${GITHUB_REF_NAME#v}" --notes ""
+          cd src-tauri/target/release/bundle/nsis
+          gh release upload "$GITHUB_REF_NAME" LiveSub-Player_*-setup.exe LiveSub-Player_*-setup.exe.sig --clobber
