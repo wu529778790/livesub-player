@@ -32,10 +32,8 @@ impl Default for ModelsState {
 }
 
 struct ModelSpec {
-    /// 主下载直链（模型走 hf-mirror 镜像，国内可达优先）
-    url: &'static str,
-    /// 备用源：主源重试耗尽后自动切换（None = 仅重试主源）
-    alt_url: Option<&'static str>,
+    /// 按国内速度排序的下载源：首个为主源，失败自动切下一个（每个源再重试 2 次）
+    sources: Vec<String>,
     /// 落盘文件名（asr/mt 按此查找；引擎为临时压缩包，解压后删除）
     dest: &'static str,
     /// 展示描述
@@ -48,8 +46,25 @@ struct ModelSpec {
 const LLAMA_CPP_RELEASE: &str =
     "https://github.com/ggml-org/llama.cpp/releases/download/b11552/llama-b11552-bin-macos-arm64.tar.gz";
 
+/// 下载源：魔搭（阿里云 CDN，国内实测 ~18MB/s，7 倍于 hf-mirror）优先，
+/// hf-mirror 次之，HuggingFace 官方兜底
+const MS: &str = "https://modelscope.cn";
 const HF: &str = "https://hf-mirror.com";
 const HF_ORIGIN: &str = "https://huggingface.co";
+
+/// HF 仓库文件的双源（hf-mirror + 官方）
+fn hf_sources(repo_file: &str) -> Vec<String> {
+    vec![format!("{HF}/{repo_file}"), format!("{HF_ORIGIN}/{repo_file}")]
+}
+
+/// 魔搭有官方镜像的模型：魔搭主源 + HF 双源
+fn ms_then_hf(ms_repo_file: &str, hf_repo_file: &str) -> Vec<String> {
+    vec![
+        format!("{MS}/models/{ms_repo_file}"),
+        format!("{HF}/{hf_repo_file}"),
+        format!("{HF_ORIGIN}/{hf_repo_file}"),
+    ]
+}
 
 /// 翻译引擎落盘路径（models.rs 负责下载解压，mt.rs 按此拉起）
 pub fn engine_bin() -> PathBuf {
@@ -60,15 +75,13 @@ pub fn engine_bin() -> PathBuf {
 fn spec(name: &str) -> Option<ModelSpec> {
     match name {
         "whisper-base" => Some(ModelSpec {
-            url: format!("{HF}/ggerganov/whisper.cpp/resolve/main/ggml-base.bin").leak(),
-            alt_url: Some(format!("{HF_ORIGIN}/ggerganov/whisper.cpp/resolve/main/ggml-base.bin").leak()),
+            sources: hf_sources("ggerganov/whisper.cpp/resolve/main/ggml-base.bin"),
             dest: "ggml-base.bin",
             desc: "语音识别·快速档（~142MB，默认）",
             member: None,
         }),
         "whisper-small" => Some(ModelSpec {
-            url: format!("{HF}/ggerganov/whisper.cpp/resolve/main/ggml-small.bin").leak(),
-            alt_url: Some(format!("{HF_ORIGIN}/ggerganov/whisper.cpp/resolve/main/ggml-small.bin").leak()),
+            sources: hf_sources("ggerganov/whisper.cpp/resolve/main/ggml-small.bin"),
             dest: "ggml-small.bin",
             desc: "语音识别·均衡档（~466MB，更准）",
             member: None,
@@ -76,23 +89,25 @@ fn spec(name: &str) -> Option<ModelSpec> {
         // 引擎是 macOS 预编译二进制，其余平台发布物暂不可用，不列出
         #[cfg(target_os = "macos")]
         "translation-engine" => Some(ModelSpec {
-            url: LLAMA_CPP_RELEASE.to_string().leak(),
-            alt_url: None,
+            sources: vec![LLAMA_CPP_RELEASE.to_string()],
             dest: "llama-server.tar.gz",
             desc: "本地翻译·引擎（~12MB，一次性下载）",
             member: Some("llama-server"),
         }),
-        // 腾讯官方 GGUF（tencent/HY-MT1.5-1.8B-GGUF），Q4_K_M ~1.1GB
+        // 腾讯官方 GGUF，魔搭有镜像（tencent/HY-MT1.5-1.8B-GGUF），Q4_K_M ~1.1GB
         "translation-light" => Some(ModelSpec {
-            url: format!("{HF}/tencent/HY-MT1.5-1.8B-GGUF/resolve/main/HY-MT1.5-1.8B-Q4_K_M.gguf").leak(),
-            alt_url: Some(format!("{HF_ORIGIN}/tencent/HY-MT1.5-1.8B-GGUF/resolve/main/HY-MT1.5-1.8B-Q4_K_M.gguf").leak()),
+            sources: ms_then_hf(
+                "Tencent-Hunyuan/HY-MT1.5-1.8B-GGUF/resolve/master/HY-MT1.5-1.8B-Q4_K_M.gguf",
+                "tencent/HY-MT1.5-1.8B-GGUF/resolve/main/HY-MT1.5-1.8B-Q4_K_M.gguf",
+            ),
             dest: "hunyuan-mt-light.gguf",
             desc: "本地翻译·轻量（~1.1GB，推荐）",
             member: None,
         }),
         "translation" => Some(ModelSpec {
-            url: format!("{HF}/imikeliu/Hunyuan-MT-7B-Q4_K_M-GGUF/resolve/main/hunyuan-mt-7b-q4_k_m.gguf").leak(),
-            alt_url: Some(format!("{HF_ORIGIN}/imikeliu/Hunyuan-MT-7B-Q4_K_M-GGUF/resolve/main/hunyuan-mt-7b-q4_k_m.gguf").leak()),
+            sources: hf_sources(
+                "imikeliu/Hunyuan-MT-7B-Q4_K_M-GGUF/resolve/main/hunyuan-mt-7b-q4_k_m.gguf",
+            ),
             dest: "translation.gguf",
             desc: "本地翻译·高质量（~4.4GB，更准）",
             member: None,
@@ -207,14 +222,10 @@ pub fn cmd_model_download(app: AppHandle, name: String) -> Result<(), String> {
     let app2 = app.clone();
     let name2 = name.clone();
     std::thread::spawn(move || {
-        // 主源 2 次重试 → 备用源 2 次重试；暂停/取消立即返回（.part 保留供续传）
-        let mut sources: Vec<&str> = vec![spec.url];
-        if let Some(alt) = spec.alt_url {
-            sources.push(alt);
-        }
+        // 按源顺序下载，每源 2 次重试；暂停/取消立即返回（.part 保留供续传）
         let mut last_err = String::new();
         let mut outcome: Option<DlOutcome> = None;
-        'sources: for (si, src) in sources.iter().enumerate() {
+        'sources: for (si, src) in spec.sources.iter().enumerate() {
             for attempt in 0..2 {
                 if si + attempt > 0 {
                     log::warn!("[models] {} 第 {} 次尝试 {}（上次：{}）", name2, si * 2 + attempt + 1, src, last_err);
