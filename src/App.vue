@@ -6,7 +6,7 @@
         <path d="M19 16.2 33.4 24 19 31.8Z" fill="#16121c" />
       </svg>
       <span class="filename">{{ filename || "LiveSub-Player" }}</span>
-      <button class="bar-btn" @click="settingsOpen = true">设置</button>
+      <button class="bar-btn" @click="settingsOpen = true; playlistOpen = false">设置</button>
     </header>
 
     <!-- 设置抽屉：右侧滑出，点遮罩或 ✕ 关闭 -->
@@ -114,8 +114,8 @@
           <button class="switch" :class="{ on: rememberPlayer }" title="切换" @click="toggleRemember"><i /></button>
         </div>
         <div class="set-row">
-          <span class="set-label">启动时恢复上次播放<small>自动打开上次看的视频并跳到上次进度</small></span>
-          <button class="switch" :class="{ on: resumeLast }" title="切换" @click="toggleResume"><i /></button>
+          <span class="set-label">记住播放位置<small>同一视频再次打开时自动跳到上次进度</small></span>
+          <button class="switch" :class="{ on: rememberPosition }" title="切换" @click="toggleRememberPos"><i /></button>
         </div>
       </template>
 
@@ -145,6 +145,32 @@
           <button class="link-btn" title="在浏览器打开仓库" @click="openUrl(GITHUB_URL)">wu529778790/livesub-player</button>
         </div>
       </template>
+    </div>
+
+    <!-- 播放列表抽屉：文件夹扫出的视频队列，点选换片；连播顺序即列表顺序 -->
+    <transition name="fade">
+      <div v-if="playlistOpen" class="drawer-mask" @click="playlistOpen = false" />
+    </transition>
+    <div class="drawer" :class="{ open: playlistOpen }">
+      <div class="drawer-head">
+        <span>播放列表{{ playlist.length ? `（${playlist.length}）` : "" }}</span>
+        <button class="drawer-close" title="关闭" @click="playlistOpen = false">✕</button>
+      </div>
+      <button class="btn small ghost set-btn" @click="openFolder">打开文件夹…</button>
+      <template v-if="playlist.length">
+        <button
+          v-for="(p, i) in playlist"
+          :key="p"
+          class="pl-item"
+          :class="{ on: p === videoPath }"
+          :title="p"
+          @click="playFromPlaylist(p)"
+        >
+          <span class="pl-idx">{{ p === videoPath ? "▶" : i + 1 }}</span>
+          <span class="pl-name">{{ filenameOf(p) }}</span>
+        </button>
+      </template>
+      <p v-else class="set-hint">列表还是空的：打开一个文件夹，里面的视频会排进来；正在播的也会显示在这里。播完一条自动接下一条。</p>
     </div>
 
     <!-- 视频区域：播放中背景全透明，透出下层 mpv 画面；未加载时整窗不透明（见 .shell.is-empty）；输入由前端接管 -->
@@ -194,8 +220,30 @@
             <path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
           </svg>
           <span class="dz-main">把视频文件拖到这里，或点击选择</span>
-          <span class="dz-sub">支持 MP4、MKV、MOV、WebM 等常见格式</span>
+          <span class="dz-sub">支持 MP4、MKV、MOV、WebM 等常见格式；拖入文件夹 = 整个文件夹排成播放列表</span>
         </button>
+        <button class="folder-link" @click="openFolder">或打开一个文件夹，批量播放里面的视频 →</button>
+
+        <!-- 最近播放：点击直接续播（进度存本机；文件已删除的条目不显示） -->
+        <div v-if="historyList.length" class="history">
+          <div class="history-title">最近播放</div>
+          <button
+            v-for="h in historyList"
+            :key="h.path"
+            class="history-item"
+            :title="h.path"
+            @click="loadVideo(h.path)"
+          >
+            <span class="hi-main">
+              <span class="hi-name">{{ h.filename }}</span>
+              <span class="hi-meta">
+                {{ relTime(h.updated_at) }}
+                <template v-if="h.duration > 0 && h.position > 5"> · 看到 {{ fmtTime(h.position) }}</template>
+              </span>
+            </span>
+            <span v-if="h.duration > 0" class="hi-bar"><i :style="{ width: histPct(h) + '%' }" /></span>
+          </button>
+        </div>
 
         <template v-if="showWizard">
           <div class="wizard-card">
@@ -354,6 +402,9 @@
         aria-label="音量"
         @input="changeVolume"
       />
+      <button class="ctl-btn" title="播放列表（菜单 文件 → 播放列表）" aria-label="播放列表" @click="togglePlaylist">
+        <svg viewBox="0 0 24 24"><path d="M3 6h13v2H3zM3 12h13v2H3zM3 18h9v2H3zM15.5 13.5l6 3.5-6 3.5z" /></svg>
+      </button>
       <button class="ctl-btn" title="截图到桌面（S）" aria-label="截图" @click="screenshot">
         <svg viewBox="0 0 24 24" fill-rule="evenodd"><path d="M9 3 7.17 5H4a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-3.17L15 3H9zm3 4.5a4.5 4.5 0 1 1 0 9 4.5 4.5 0 0 1 0-9zm0 2a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z" /></svg>
       </button>
@@ -373,6 +424,7 @@
       <button class="ctx-item" @click="ctxOpen = false; screenshot()">截图</button>
       <button class="ctx-item" @click="ctxOpen = false; exportSubs()">导出全片字幕…</button>
       <button class="ctx-item" @click="ctxOpen = false; toggleFullscreen()">全屏</button>
+      <button class="ctx-item" @click="ctxOpen = false; closeVideo()">关闭视频</button>
       <div class="ctx-divider" />
       <div class="ctx-label">字幕模式</div>
       <button
@@ -421,14 +473,57 @@ const speed = ref(1);
 const displayTime = ref(0); // 拖动进度条时的临时显示值
 const dragging = ref(false);
 
-// 实时字幕状态（asr:// 事件）
+// 实时字幕状态（asr:// 事件 + 字幕库载入；识别/补全乱序到达，插入时排序，查询走二分）
 interface Sub {
   start: number;
   end: number;
   text: string;
 }
+interface Trans {
+  start: number;
+  end: number;
+  src: string;
+  dst: string;
+}
 const subs = ref<Sub[]>([]);
-const translations = ref<{ start: number; end: number; src: string; dst: string }[]>([]);
+const translations = ref<Trans[]>([]);
+// 源文本 → 译文（缓存命中回放时时间对不上，按文本兜底）；Map 非响应式，用 bump 触发
+const transByText = new Map<string, string>();
+const transBump = ref(0);
+
+function insertSorted<T extends { start: number }>(arr: T[], item: T) {
+  let lo = 0;
+  let hi = arr.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (arr[mid].start < item.start) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+function insertSub(s: Sub) {
+  const arr = subs.value;
+  const lo = insertSorted(arr, s);
+  // 邻域去重：实时会话与全片补全都可能报同一段
+  for (let i = Math.max(0, lo - 3); i < Math.min(arr.length, lo + 3); i++) {
+    if (arr[i].text === s.text && Math.abs(arr[i].start - s.start) < 0.05) return;
+  }
+  arr.splice(lo, 0, s);
+}
+
+function insertTranslation(t: Trans) {
+  const arr = translations.value;
+  const lo = insertSorted(arr, t);
+  for (let i = Math.max(0, lo - 3); i < Math.min(arr.length, lo + 3); i++) {
+    if (arr[i].src === t.src && Math.abs(arr[i].start - t.start) < 0.05) return;
+  }
+  arr.splice(lo, 0, t);
+  if (transByText.get(t.src) !== t.dst) {
+    transByText.set(t.src, t.dst);
+    transBump.value++;
+  }
+}
 const mtAvailable = ref(true);
 const settingsOpen = ref(false);
 const speedPopOpen = ref(false);
@@ -487,8 +582,19 @@ const subFont = ref("medium"); // 字幕字号：small / medium / large
 const subPos = ref("bottom"); // 字幕位置：bottom / raised / high
 const asrLang = ref("auto"); // 识别语言：auto / zh / en / ja / ko
 const rememberPlayer = ref(true); // 记住音量与倍速
-const resumeLast = ref(true); // 启动时恢复上次播放
+const rememberPosition = ref(true); // 按文件记住播放进度（再次打开续播）
 const autoUpdate = ref(true); // 启动时自动检查更新
+
+// 最近播放（欢迎页；后端已按 updated_at 倒序，不存在的文件已过滤）
+interface HistoryItem {
+  path: string;
+  filename: string;
+  position: number;
+  duration: number;
+  updated_at: number;
+  exists: boolean;
+}
+const historyList = ref<HistoryItem[]>([]);
 const appVersion = ref("");
 const checkingUpdate = ref(false);
 let volSaveTimer: number | undefined;
@@ -497,26 +603,28 @@ let lastPosSave = 0;
 const overlayClass = computed(() => [`of-${subFont.value}`, `op-${subPos.value}`]);
 
 const activeSub = computed(() => {
-  for (let i = subs.value.length - 1; i >= 0; i--) {
-    const s = subs.value[i];
-    if (s.start <= timePos.value && timePos.value <= s.end) return s;
+  // 二分定位最后一个 start ≤ 播放位置的段，再回看邻域找包含当前时间的
+  const arr = subs.value;
+  const t = timePos.value;
+  const lo = insertSorted(arr, { start: t, end: 0, text: "" });
+  for (let i = lo - 1; i >= 0 && i >= lo - 30; i--) {
+    if (arr[i].end >= t) return arr[i];
+    if (t - arr[i].end > 20) break;
   }
   return null;
 });
-// 译文：优先时间重叠，其次按源文本匹配（缓存命中时时间可能略有出入）
+// 译文：优先时间重叠，其次按源文本匹配（缓存命中回放时时间可能对不上）
 const activeTranslation = computed(() => {
+  transBump.value; // 译文文本映射变更时重算
   const ts = translations.value;
-  for (let i = ts.length - 1; i >= 0; i--) {
-    const t = ts[i];
-    if (t.start <= timePos.value && timePos.value <= t.end) return t.dst;
+  const t = timePos.value;
+  const lo = insertSorted(ts, { start: t, end: 0, src: "", dst: "" });
+  for (let i = lo - 1; i >= 0 && i >= lo - 30; i--) {
+    if (ts[i].end >= t) return ts[i].dst;
+    if (t - ts[i].end > 20) break;
   }
   const src = activeSub.value?.text;
-  if (src) {
-    for (let i = ts.length - 1; i >= 0; i--) {
-      if (ts[i].src === src) return ts[i].dst;
-    }
-  }
-  return "";
+  return (src && transByText.get(src)) || "";
 });
 
 const barRef = ref<HTMLElement | null>(null);
@@ -567,14 +675,19 @@ onMounted(async () => {
     if (p.duration != null) {
       duration.value = p.duration;
       loaded.value = loaded.value || p.duration > 0;
+      void onMediaReady();
     }
     if (p.timePos != null && !dragging.value) {
       timePos.value = p.timePos;
       displayTime.value = p.timePos;
-      // 播放进度每 3s 落盘一次（供「启动恢复上次播放」用）
-      if (Math.abs(p.timePos - lastPosSave) >= 3) {
+      // 播放进度每 3s 落盘一次（按文件记忆，供「再次打开续播」用）
+      if (videoPath.value && Math.abs(p.timePos - lastPosSave) >= 3) {
         lastPosSave = p.timePos;
-        void invoke("cmd_set_setting", { key: "last_video_pos", value: String(Math.floor(p.timePos)) }).catch(() => {});
+        void invoke("cmd_history_record", {
+          path: videoPath.value,
+          position: Math.floor(p.timePos),
+          duration: duration.value,
+        }).catch(() => {});
       }
     }
     if (p.paused != null) paused.value = p.paused;
@@ -590,7 +703,7 @@ onMounted(async () => {
   window.addEventListener("keydown", onKey);
   // asr 事件
   await listen<Sub>("asr://subtitle", (e) => {
-    subs.value.push(e.payload);
+    insertSub(e.payload);
   });
   await listen<{ start: number; end: number }>("asr://progress", (e) => {
     recognizing.value = e.payload;
@@ -601,9 +714,57 @@ onMounted(async () => {
   await listen<string>("asr://error", (e) => {
     asrError.value = String(e.payload);
   });
+  // 后台补全跑完：全片字幕已就绪（之后 seek 任意位置都有字幕）
+  await listen<string>("asr://complete", () => {
+    if (loaded.value) showToast("全片字幕已就绪");
+  });
+  // 后端发起的加载（自动化钩子等）：前端对齐状态
+  await listen<{ path: string }>("player://loaded", (e) => {
+    const path = e.payload.path;
+    if (path === videoPath.value) return;
+    videoPath.value = path;
+    filename.value = path.split("/").pop() || path;
+    loaded.value = true;
+    status.value = "";
+    subs.value = [];
+    translations.value = [];
+    transByText.clear();
+    transBump.value++;
+    asrError.value = "";
+    recognizing.value = null;
+    errorBar.value = "";
+  });
   await listen<string>("player://error", (e) => {
     // mpv 异步播放失败（坏文件/不支持的编码）：loadfile 同步成功但 END_FILE 报错
     showError(String(e.payload));
+  });
+  // 自然播完 → 播放列表自动连播；列表播完回欢迎页（手动 stop 不触发）
+  await listen("player://ended", () => {
+    const idx = playlist.value.indexOf(videoPath.value);
+    const next = idx >= 0 ? playlist.value[idx + 1] : undefined;
+    if (next) {
+      showToast(`连播下一集：${filenameOf(next)}`);
+      void loadVideo(next);
+    } else if (playlist.value.length) {
+      void closeVideo();
+    }
+  });
+  // macOS 菜单栏点击统一转发到这里分发（业务逻辑都长在前端函数里，见 menu.rs）
+  await listen<string>("menu://action", (e) => {
+    const id = e.payload;
+    if (id === "open-file") void openFile();
+    else if (id === "open-folder") void openFolder();
+    else if (id === "close-video") void closeVideo();
+    else if (id === "toggle-playlist") togglePlaylist();
+    else if (id === "export-subs") void exportSubs();
+    else if (id === "toggle-fullscreen") void toggleFullscreen();
+    else if (id === "toggle-pause") { if (loaded.value) void togglePause(); }
+    else if (id === "seek-back") { if (loaded.value) void seekBy(-10); }
+    else if (id === "seek-forward") { if (loaded.value) void seekBy(10); }
+    else if (id === "screenshot") { if (loaded.value) void screenshot(); }
+    else if (id.startsWith("speed:")) void setSpeed(Number(id.slice(6)));
+    else if (id.startsWith("mode:")) setMode(id.slice(5) as "原文" | "译文" | "双语");
+    else if (id.startsWith("recent:")) void loadVideo(id.slice(7));
   });
   await listen<{
     start: number;
@@ -611,7 +772,7 @@ onMounted(async () => {
     src: string;
     dst: string;
   }>("asr://translation", (e) => {
-    translations.value.push(e.payload);
+    insertTranslation(e.payload);
   });
   // 全片字幕导出任务（异步识别整个视频）
   await listen<{ percent: number }>("export://progress", (e) => {
@@ -687,7 +848,7 @@ onMounted(async () => {
   mode.value =
     ((await invoke<string>("cmd_get_setting", { key: "sub_mode" })) as "译文" | "原文" | "双语") || "双语";
   rememberPlayer.value = ((await invoke<string>("cmd_get_setting", { key: "remember_player" })) ?? "1") !== "0";
-  resumeLast.value = ((await invoke<string>("cmd_get_setting", { key: "resume_last" })) ?? "1") !== "0";
+  rememberPosition.value = ((await invoke<string>("cmd_get_setting", { key: "remember_position" })) ?? "1") !== "0";
   autoUpdate.value = ((await invoke<string>("cmd_get_setting", { key: "auto_update" })) ?? "1") !== "0";
   appVersion.value = await getVersion().catch(() => "");
   ffmpegOk.value = await invoke<boolean>("cmd_check_ffmpeg").catch(() => true);
@@ -709,20 +870,40 @@ onMounted(async () => {
   await listen<number>("update://progress", (e) => {
     updatePct.value = e.payload;
   });
-  // 启动恢复上次播放（延迟 1.2s：避开 mpv 初始化与首帧渲染，且不打断自动化钩子）
-  window.setTimeout(async () => {
-    if (loaded.value || !resumeLast.value) return;
-    const last = await invoke<string>("cmd_get_setting", { key: "last_video" }).catch(() => null);
-    if (!last) return;
-    status.value = "正在恢复上次播放…";
-    await loadVideo(last);
-    const pos = Number(await invoke<string>("cmd_get_setting", { key: "last_video_pos" }).catch(() => null)) || 0;
-    if (pos > 5) {
-      await invoke("cmd_player_seek", { target: pos, absolute: true }).catch(() => {});
-    }
-    showToast(`已恢复上次播放：${filename.value}`);
-  }, 1200);
+  // 最近播放（欢迎页列表）
+  const hl = await invoke<HistoryItem[]>("cmd_history_list").catch(() => [] as HistoryItem[]);
+  historyList.value = hl.filter((h) => h.exists).slice(0, 8);
 });
+
+// ---- 媒体就绪钩子（每部视频一次，时长可知后触发）：字幕库上屏 + 按文件续播 ----
+let mediaReadyFor = "";
+async function onMediaReady() {
+  const path = videoPath.value;
+  if (!path || !duration.value || mediaReadyFor === path) return;
+  mediaReadyFor = path;
+  // 字幕库：识别过的段直接上屏（重开视频秒出全片字幕；后端已排序）
+  try {
+    const t = await invoke<{ segments: Sub[] }>("cmd_transcript_get", {
+      path,
+      duration: duration.value,
+    });
+    if (videoPath.value === path) subs.value = t.segments ?? [];
+  } catch {
+    // 字幕库读不出不影响播放
+  }
+  if (videoPath.value !== path) return;
+  // 按文件续播：>5s 且未看到 95%（看完的重头播）
+  if (rememberPosition.value) {
+    const rec = await invoke<{ position: number; duration: number } | null>("cmd_history_get", {
+      path,
+    }).catch(() => null);
+    const dur = rec?.duration || duration.value;
+    if (rec && rec.position > 5 && rec.position < dur * 0.95) {
+      await invoke("cmd_player_seek", { target: rec.position, absolute: true }).catch(() => {});
+      if (videoPath.value === path) showToast(`已续播到 ${fmtTime(rec.position)}`);
+    }
+  }
+}
 
 async function installUpdate() {
   if (updatePct.value !== null) return;
@@ -857,9 +1038,9 @@ function toggleRemember() {
   void saveSetting("remember_player", rememberPlayer.value ? "1" : "0");
 }
 
-function toggleResume() {
-  resumeLast.value = !resumeLast.value;
-  void saveSetting("resume_last", resumeLast.value ? "1" : "0");
+function toggleRememberPos() {
+  rememberPosition.value = !rememberPosition.value;
+  void saveSetting("remember_position", rememberPosition.value ? "1" : "0");
 }
 
 function toggleAutoUpdate() {
@@ -1080,7 +1261,8 @@ function onUiActivity() {
   idleTimer = window.setTimeout(() => {
     if (
       loaded.value && !paused.value && !dragging.value &&
-      !settingsOpen.value && !speedPopOpen.value && !ctxOpen.value
+      !settingsOpen.value && !speedPopOpen.value && !ctxOpen.value &&
+      !playlistOpen.value
     ) {
       idle.value = true;
     }
@@ -1089,7 +1271,8 @@ function onUiActivity() {
 const uiHidden = computed(
   () =>
     idle.value && loaded.value && !paused.value && !dragging.value &&
-    !settingsOpen.value && !speedPopOpen.value && !ctxOpen.value
+    !settingsOpen.value && !speedPopOpen.value && !ctxOpen.value &&
+    !playlistOpen.value
 );
 
 // ---- 进度条拖动 + 悬停预览 ----
@@ -1127,18 +1310,104 @@ async function openFile() {
   if (typeof path === "string") await loadVideo(path);
 }
 
+// ---- 播放列表（文件夹批量）----
+const playlist = ref<string[]>([]);
+const playlistOpen = ref(false);
+
+function filenameOf(p: string): string {
+  return p.split("/").pop() || p;
+}
+
+function togglePlaylist() {
+  settingsOpen.value = false;
+  playlistOpen.value = !playlistOpen.value;
+}
+
+async function openFolder() {
+  const dir = await open({ directory: true });
+  if (typeof dir !== "string") return;
+  const vids = await invoke<string[]>("cmd_scan_folder", { path: dir }).catch(() => [] as string[]);
+  if (!vids.length) {
+    showToast("该文件夹里没有视频文件");
+    return;
+  }
+  playlist.value = vids;
+  settingsOpen.value = false;
+  playlistOpen.value = true;
+}
+
+function playFromPlaylist(p: string) {
+  playlistOpen.value = false;
+  if (p === videoPath.value) return; // 正在播的就是它
+  void loadVideo(p);
+}
+
+// 拖入的可能是视频文件，也可能是文件夹（扫出视频列表）
+async function handleDroppedPath(p: string) {
+  const ext = p.split(".").pop()?.toLowerCase() || "";
+  if (VIDEO_EXTS.includes(ext)) {
+    await loadVideo(p);
+    return;
+  }
+  const vids = await invoke<string[]>("cmd_scan_folder", { path: p }).catch(() => [] as string[]);
+  if (vids.length) {
+    playlist.value = vids;
+    settingsOpen.value = false;
+    playlistOpen.value = true;
+    showToast(`已载入播放列表（${vids.length} 个视频）`);
+  } else {
+    showToast("里面没有找到视频文件");
+  }
+}
+
+// 关掉当前视频：进度补一次落盘 → mpv stop + 识别会话收尾 → 回欢迎页
+async function closeVideo() {
+  if (!loaded.value) return;
+  if (videoPath.value) {
+    void invoke("cmd_history_record", {
+      path: videoPath.value,
+      position: Math.floor(timePos.value),
+      duration: duration.value,
+    }).catch(() => {});
+  }
+  await invoke("cmd_player_stop").catch(() => {});
+  loaded.value = false;
+  videoPath.value = "";
+  filename.value = "";
+  subs.value = [];
+  translations.value = [];
+  transByText.clear();
+  transBump.value++;
+  asrError.value = "";
+  recognizing.value = null;
+  asrProgressLive.value = false;
+  errorBar.value = "";
+  timePos.value = 0;
+  displayTime.value = 0;
+  duration.value = 0;
+  paused.value = false;
+  mediaReadyFor = "";
+  // 欢迎页最近播放刷新（刚关的这部带最新进度）
+  const hl = await invoke<HistoryItem[]>("cmd_history_list").catch(() => [] as HistoryItem[]);
+  historyList.value = hl.filter((h) => h.exists).slice(0, 8);
+  playlistOpen.value = false;
+  showToast("已关闭当前视频");
+}
+
 async function onDrop(e: DragEvent) {
   const files = e.dataTransfer?.files;
   if (!files?.length) return;
   // Tauri 拖放：用 webviewWindow 事件拿真实路径（file:// 输入只兜底）
   const path = decodeURIComponent((files[0] as File & { path?: string }).path || "");
-  if (path) await loadVideo(path);
+  if (path) void handleDroppedPath(path);
 }
 
 async function loadVideo(path: string) {
   // 换片先清空上一部的字幕/错误状态：旧片字幕串到新片、红条永不清除都是这个坑
   subs.value = [];
   translations.value = [];
+  transByText.clear();
+  transBump.value++;
   asrError.value = "";
   recognizing.value = null;
   errorBar.value = "";
@@ -1149,8 +1418,7 @@ async function loadVideo(path: string) {
     filename.value = path.split("/").pop() || path;
     loaded.value = true;
     status.value = "";
-    // 记住本次播放的文件（启动恢复用）+ 回放记忆的音量倍速
-    void invoke("cmd_set_setting", { key: "last_video", value: path }).catch(() => {});
+    // 字幕库/续播在时长可知后由 onMediaReady 接管；回放记忆的音量倍速
     void applyPersistedPlayer();
   } catch (e) {
     // 同步失败（mpv 初始化/loadfile 被拒）：停在欢迎页并给出可见报错
@@ -1227,6 +1495,7 @@ function onKey(e: KeyboardEvent) {
       ctxOpen.value = false;
       speedPopOpen.value = false;
       settingsOpen.value = false;
+      playlistOpen.value = false;
       break;
   }
 }
@@ -1257,14 +1526,30 @@ function fmtTime(t: number): string {
   return h > 0 ? `${h}:${mm}:${String(s).padStart(2, "0")}` : `${mm}:${String(s).padStart(2, "0")}`;
 }
 
+// 最近播放条目的相对时间与进度百分比
+function relTime(unixSecs: number): string {
+  const diff = Date.now() / 1000 - unixSecs;
+  if (diff < 90) return "刚刚";
+  if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`;
+  if (diff < 86400 * 30) return `${Math.floor(diff / 86400)} 天前`;
+  const d = new Date(unixSecs * 1000);
+  return `${d.getMonth() + 1} 月 ${d.getDate()} 日`;
+}
+
+function histPct(h: HistoryItem): number {
+  if (!h.duration) return 0;
+  return Math.min(100, Math.round((h.position / h.duration) * 100));
+}
+
 // 注册 Tauri 原生拖放（拿真实文件路径 + 驱动拖放区高亮）
 onMounted(async () => {
   await getCurrentWebviewWindow().onDragDropEvent((ev) => {
     const t = ev.payload.type;
-    if (t === "drop") {
-      dragHover.value = false;
-      if (ev.payload.paths.length > 0) loadVideo(ev.payload.paths[0]);
-    } else if (t === "enter" || t === "over") {
+      if (t === "drop") {
+        dragHover.value = false;
+        if (ev.payload.paths.length > 0) void handleDroppedPath(ev.payload.paths[0]);
+      } else if (t === "enter" || t === "over") {
       dragHover.value = true;
     } else {
       dragHover.value = false;
@@ -1356,6 +1641,7 @@ onMounted(async () => {
   gap: 30px;
   padding: 24px;
   text-align: center;
+  overflow-y: auto;
 }
 
 .welcome-brand {
@@ -1427,6 +1713,140 @@ onMounted(async () => {
 .dz-sub {
   font-size: 12px;
   color: #8f8f9a;
+}
+
+/* ---- 最近播放（欢迎页） ---- */
+.history {
+  width: min(520px, 84%);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.history-title {
+  font-size: 12px;
+  color: #8f8f9a;
+  text-align: left;
+  padding-left: 4px;
+}
+
+.history-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  color: #f2f2f2;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+
+.history-item:hover {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.hi-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.hi-name {
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hi-meta {
+  font-size: 11px;
+  color: #8f8f9a;
+}
+
+.hi-bar {
+  width: 72px;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.hi-bar i {
+  display: block;
+  height: 100%;
+  background: #f2b544;
+  border-radius: 2px;
+}
+
+/* ---- 欢迎页「打开文件夹」入口 ---- */
+.folder-link {
+  margin-top: -14px;
+  border: none;
+  background: transparent;
+  color: #8f8f9a;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 4px 12px;
+  border-radius: 6px;
+}
+
+.folder-link:hover {
+  color: #ffd479;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+/* ---- 播放列表抽屉 ---- */
+.pl-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: #d9d9e2;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  font-size: 13px;
+}
+
+.pl-item:hover {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.pl-item.on {
+  color: #ffd479;
+  background: rgba(242, 181, 68, 0.1);
+}
+
+.pl-idx {
+  width: 22px;
+  flex-shrink: 0;
+  font-size: 11px;
+  color: #8f8f9a;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.pl-item.on .pl-idx {
+  color: #ffd479;
+}
+
+.pl-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* 首启向导卡片 */
