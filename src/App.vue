@@ -453,6 +453,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { error as logError, info as logInfo } from "@tauri-apps/plugin-log";
 import { getVersion } from "@tauri-apps/api/app";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -874,6 +875,14 @@ onMounted(async () => {
   // 最近播放（欢迎页列表）
   const hl = await invoke<HistoryItem[]>("cmd_history_list").catch(() => [] as HistoryItem[]);
   historyList.value = hl.filter((h) => h.exists).slice(0, 8);
+  // TODO(诊断): 字幕显示链路排查用，定位后移除
+  window.setInterval(() => {
+    if (loaded.value) {
+      console.log(
+        `[subdebug] t=${timePos.value.toFixed(1)} subs=${subs.value.length} trans=${translations.value.length} active=${activeSub.value ? `${activeSub.value.start.toFixed(0)}-${activeSub.value.end.toFixed(0)}` : "null"} transNow=${activeTranslation.value ? "1" : "0"}`,
+      );
+    }
+  }, 3000);
 });
 
 // ---- 媒体就绪钩子（每部视频一次，时长可知后触发）：字幕库上屏 + 按文件续播 ----
@@ -883,14 +892,18 @@ async function onMediaReady() {
   if (!path || !duration.value || mediaReadyFor === path) return;
   mediaReadyFor = path;
   // 字幕库：识别过的段直接上屏（重开视频秒出全片字幕；后端已排序）
+  // 注意：cmd_transcript_get 返回的就是段数组本身（Result<Vec<Seg>>），不是 {segments} 包裹
   try {
-    const t = await invoke<{ segments: Sub[] }>("cmd_transcript_get", {
+    const segs = await invoke<Sub[]>("cmd_transcript_get", {
       path,
       duration: duration.value,
     });
-    if (videoPath.value === path) subs.value = t.segments ?? [];
-  } catch {
-    // 字幕库读不出不影响播放
+    if (videoPath.value === path) {
+      subs.value = segs ?? [];
+      void logInfo(`[字幕库] 载入 ${subs.value.length} 段`);
+    }
+  } catch (e) {
+    void logError(`[字幕库] 载入失败: ${e}`);
   }
   if (videoPath.value !== path) return;
   // 按文件续播：>5s 且未看到 95%（看完的重头播）
