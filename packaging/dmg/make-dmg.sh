@@ -6,7 +6,7 @@
 #   stage-dir 内放 LiveSub-Player.app（Applications 软链由 create-dmg 自动创建并摆放）
 #
 # 布局对应 packaging/dmg/dmg-bg.png（1320×840，即窗口 660×420 的 2x）：
-#   标题 y≈92（顶部）｜图标槽位中心 y≈222（从顶部算）｜说明文字 y≈318｜左下角安装提示
+#   标题 y≈92（顶部）｜图标槽位中心 y≈222（从顶部算）｜说明文字 y≈318
 #   create-dmg 的 Y 轴从窗口底部起算，数值经本机 DMG 截图校准（见 git blame）。
 set -euo pipefail
 
