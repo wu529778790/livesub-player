@@ -61,8 +61,10 @@ pub fn run() {
             settings::cmd_open_log_dir,
             settings::cmd_open_url,
             export::cmd_export_srt,
+            export::cmd_export_srt_auto,
             asr::cmd_export_full_srt,
             asr::cmd_cancel_export,
+            asr::cmd_check_ffmpeg,
             update::cmd_check_update,
             update::cmd_install_update,
         ])

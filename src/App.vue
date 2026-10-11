@@ -103,7 +103,7 @@
           >{{ pendingDelete === m.name ? "确认删除" : "删除" }}</button>
         </div>
         <p class="set-hint">
-          在线翻译需要能访问 Google（自动走系统代理）；本地翻译完全离线，没有内容限制。
+          在线翻译需要能访问 Google（自动走系统代理）；本地翻译 = 引擎 + 模型两个都装好后完全离线，没有内容限制。
         </p>
       </template>
 
@@ -202,13 +202,30 @@
             <p class="wizard-title">首次使用：下载离线模型</p>
             <p class="wizard-text">
               语音识别需要下载识别模型（约 466MB）；<br />
-              在线翻译开箱即用；本地翻译模型（约 4.4GB）可离线翻译、无视内容限制。
+              本地翻译 = 翻译引擎（约 12MB）+ 翻译模型（约 4.4GB），全离线、无视内容限制。<br />
+              在线翻译开箱即用，无需下载。下载支持断点续传，中途关掉也没关系。
             </p>
             <div class="wizard-actions">
-              <button class="btn" @click.stop="wizardDownloadAll">
-                {{ wizardDownloading ? "下载中…" : "下载全部模型（识别 + 翻译）" }}
+              <button class="btn" :disabled="wizardDownloading" @click.stop="wizardDownloadAll">
+                {{ wizardButtonLabel }}
               </button>
-              <button class="btn ghost" @click.stop="wizardDismiss">暂不下载，直接开始</button>
+              <button class="btn ghost" :disabled="wizardDownloading" @click.stop="wizardDismiss">
+                暂不下载，直接开始
+              </button>
+            </div>
+          </div>
+        </template>
+
+        <!-- ffmpeg 缺失：识别字幕的硬前提，必须显式引导（播放功能不依赖它） -->
+        <template v-if="!ffmpegOk">
+          <div class="wizard-card">
+            <p class="wizard-title">还差一步：安装 ffmpeg</p>
+            <p class="wizard-text">
+              字幕识别依赖 ffmpeg（播放不依赖）。在终端执行下面的命令后重启本应用：<br />
+              <code>brew install ffmpeg</code>
+            </p>
+            <div class="wizard-actions">
+              <button class="btn" @click.stop="copyFfmpegHint">复制安装命令</button>
             </div>
           </div>
         </template>
@@ -221,10 +238,7 @@
       <div v-if="activeSub" class="subtitle-overlay" :class="overlayClass">
         <div v-if="mode !== '译文' || !activeTranslation" class="sub-src">{{ activeSub.text }}</div>
         <div v-if="mode !== '原文' && activeTranslation" class="sub-dst">{{ activeTranslation }}</div>
-        <div
-          v-else-if="mode === '译文' && mtAvailable"
-          class="sub-dst pending"
-        >译文生成中…</div>
+        <div v-else-if="mode !== '原文' && mtAvailable" class="sub-dst pending">译文生成中…</div>
       </div>
 
       <!-- 识别进度指示（方案 §2.2：进度可见，绝不让人以为卡死） -->
@@ -244,19 +258,27 @@
         <button class="btn small ghost" @click.stop="cancelExport">取消</button>
       </div>
 
-      <!-- 在线翻译失败 → 引导下载本地模型（产品决策：告知 + 兜底） -->
-      <div v-if="needLocalModel" class="cta-bar">
-        <span>在线翻译不可用（可能被过滤或网络受限）。本地模型可离线翻译、无视屏蔽。</span>
-        <button class="btn small" @click.stop="downloadLocalModel">
-          {{ downloading ? `下载中 ${downloadPct}%` : "下载本地模型" }}
-        </button>
-      </div>
+      <!-- 通知区：错误条 / 兜底引导 / 新版本，纵向堆叠避免互相遮挡 -->
+      <div class="notices">
+        <div v-if="errorBar" class="err-bar">
+          <span>{{ errorBar }}</span>
+          <button class="err-close" title="关闭" @click.stop="errorBar = ''">✕</button>
+        </div>
 
-      <!-- 新版本提示：应用内自动更新（下载完成后自动重启替换） -->
-      <div v-if="updateInfo?.hasUpdate" class="update-bar">
-        <span>新版本 v{{ updateInfo.latest }} 可用（当前 v{{ updateInfo.current }}）</span>
-        <button v-if="updatePct === null" class="btn small" @click.stop="installUpdate">立即更新</button>
-        <button v-else class="btn small" disabled>更新中 {{ updatePct }}%</button>
+        <!-- 在线翻译失败 → 引导下载本地引擎+模型（产品决策：告知 + 兜底） -->
+        <div v-if="needLocalModel" class="cta-bar">
+          <span>在线翻译不可用（可能被过滤或网络受限）。本地翻译可离线、无视屏蔽（约 4.4GB）。</span>
+          <button class="btn small" :disabled="downloading" @click.stop="downloadLocalModel">
+            {{ downloading ? `下载中 ${downloadPct}%` : "下载本地翻译" }}
+          </button>
+        </div>
+
+        <!-- 新版本提示：应用内自动更新（下载完成后自动重启替换） -->
+        <div v-if="updateInfo?.hasUpdate" class="update-bar">
+          <span>新版本 v{{ updateInfo.latest }} 可用（当前 v{{ updateInfo.current }}）</span>
+          <button v-if="updatePct === null" class="btn small" @click.stop="installUpdate">立即更新</button>
+          <button v-else class="btn small" disabled>更新中 {{ updatePct }}%</button>
+        </div>
       </div>
 
       <!-- 操作反馈 OSD（截图/快进快退等，2.5s 自动消失） -->
@@ -265,8 +287,8 @@
 
     <!-- 控制栏 -->
     <footer v-if="loaded" class="controls">
-      <button class="ctl-btn" @click="togglePause">{{ paused ? "▶" : "⏸" }}</button>
-      <button class="ctl-btn" title="后退 10s（←）" @click="seekBy(-10)">⏪</button>
+      <button class="ctl-btn" title="播放 / 暂停（空格）" @click="togglePause">{{ paused ? "▶" : "⏸" }}</button>
+      <button class="ctl-btn" title="快退 10s（键盘 ← 为 5s）" @click="seekBy(-10)">⏪</button>
       <span class="time">{{ fmtTime(displayTime) }}</span>
       <div
         ref="barRef"
@@ -318,7 +340,7 @@
       <span class="vol-num">{{ Math.round(volume) }}</span>
       <button class="ctl-btn" title="截图到桌面（S）" @click="screenshot">📷</button>
       <button class="ctl-btn" title="导出全片字幕 SRT（E）" @click="exportSubs">📄</button>
-      <button class="ctl-btn" @click="toggleFullscreen">⛶</button>
+      <button class="ctl-btn" title="全屏（F）" @click="toggleFullscreen">⛶</button>
     </footer>
 
     <!-- 右键菜单 -->
@@ -336,7 +358,7 @@
         :key="m"
         class="ctx-item"
         :class="{ on: mode === m }"
-        @click="mode = m; ctxOpen = false"
+        @click="setMode(m); ctxOpen = false"
       >{{ mode === m ? "✓ " : "" }}{{ m }}</button>
       <div class="ctx-divider" />
       <div class="ctx-label">倍速</div>
@@ -490,6 +512,18 @@ function showToast(msg: string) {
   toastTimer = window.setTimeout(() => (toast.value = ""), 2500);
 }
 
+// 全局错误条：播放中 status 无载体，错误一度静默丢失——统一走这里（12s 自动消失，可手动关）
+const errorBar = ref("");
+let errorBarTimer: number | undefined;
+function showError(msg: string) {
+  errorBar.value = msg;
+  window.clearTimeout(errorBarTimer);
+  errorBarTimer = window.setTimeout(() => (errorBar.value = ""), 12000);
+}
+
+// ffmpeg 可用性（识别字幕的硬前提，缺失时欢迎页给出引导卡）
+const ffmpegOk = ref(true);
+
 let unlisten: UnlistenFn | null = null;
 
 const progressPct = computed(() => {
@@ -539,6 +573,10 @@ onMounted(async () => {
   await listen<string>("asr://error", (e) => {
     asrError.value = String(e.payload);
   });
+  await listen<string>("player://error", (e) => {
+    // mpv 异步播放失败（坏文件/不支持的编码）：loadfile 同步成功但 END_FILE 报错
+    showError(String(e.payload));
+  });
   await listen<{
     start: number;
     end: number;
@@ -558,14 +596,18 @@ onMounted(async () => {
   await listen<string>("export://error", (e) => {
     exporting.value = null;
     if (String(e.payload) === "已取消") showToast("已取消导出");
-    else status.value = `导出失败: ${e.payload}`;
+    else showError(`导出失败: ${e.payload}`);
   });
   await listen<string>("mt://unavailable", () => {
     mtAvailable.value = false;
+    showToast("本地翻译暂不可用，可在设置中检查引擎与模型");
+  });
+  await listen("mt://available", () => {
+    mtAvailable.value = true;
   });
   await listen<string>("mt://need-local-model", (e) => {
+    void e;
     needLocalModel.value = true;
-    status.value = String(e.payload);
   });
   await listen<{ name: string; downloadedMb: number; totalMb: number }>(
     "models://progress",
@@ -582,14 +624,31 @@ onMounted(async () => {
     downloading.value = false;
     downloadingName.value = "";
     needLocalModel.value = false;
-    status.value = "模型下载完成";
     await refreshModelStatus();
-    // whisper 模型装好后，下次识别会话自动使用
+    // 下载队列：上一个完成才启动下一个（后端同时只允许一个下载任务）
+    if (downloadQueue.value.length > 0) {
+      downloadQueue.value = downloadQueue.value.slice(1);
+      pumpQueue();
+      return;
+    }
+    if (wizardDownloading.value) {
+      wizardDownloading.value = false;
+      // 识别模型已装好即视为完成首启引导（M3：向导卡片不能再挂着）
+      if (modelStatus.value.find((m) => m.name === "whisper-small")?.installed) {
+        showWizard.value = false;
+        void invoke("cmd_set_setting", { key: "wizard_done", value: "1" }).catch(() => {});
+        showToast("模型就绪，拖入视频开始看片");
+        return;
+      }
+    }
+    showToast("模型下载完成");
   });
   await listen<string>("models://error", (e) => {
     downloading.value = false;
     downloadingName.value = "";
-    status.value = `模型下载失败: ${e.payload}`;
+    downloadQueue.value = [];
+    wizardDownloading.value = false;
+    showError(`模型下载失败: ${e.payload}`);
   });
   engine.value = await invoke<string>("cmd_mt_get_engine");
   whisperModel.value = (await invoke<string>("cmd_get_setting", { key: "whisper_model" })) || "small";
@@ -603,6 +662,7 @@ onMounted(async () => {
   resumeLast.value = ((await invoke<string>("cmd_get_setting", { key: "resume_last" })) ?? "1") !== "0";
   autoUpdate.value = ((await invoke<string>("cmd_get_setting", { key: "auto_update" })) ?? "1") !== "0";
   appVersion.value = await getVersion().catch(() => "");
+  ffmpegOk.value = await invoke<boolean>("cmd_check_ffmpeg").catch(() => true);
   void applyPersistedPlayer();
   await refreshModelStatus();
   // 首启向导：识别模型未装且未跳过过
@@ -640,7 +700,7 @@ async function installUpdate() {
   if (updatePct.value !== null) return;
   updatePct.value = 0;
   const ok = await invoke("cmd_install_update").catch((e) => {
-    status.value = String(e);
+    showError(String(e));
     updatePct.value = null; // 失败后恢复「立即更新」按钮可点
     return false;
   });
@@ -652,9 +712,25 @@ async function refreshModelStatus() {
   modelStatus.value = await invoke<ModelStatus[]>("cmd_model_status");
 }
 
+// 下载队列：后端同时只允许一个下载任务，前端排队串行（向导「下载全部」/ 引导条都用它）
+const downloadQueue = ref<string[]>([]);
+
+function enqueueDownload(names: string[]) {
+  downloadQueue.value.push(...names);
+  pumpQueue();
+}
+
+function pumpQueue() {
+  if (downloading.value || downloadQueue.value.length === 0) return;
+  void download(downloadQueue.value[0]);
+}
+
 async function download(name: string) {
   if (downloading.value) return;
-  await invoke("cmd_model_download", { name }).catch((e) => (status.value = String(e)));
+  await invoke("cmd_model_download", { name }).catch((e) => {
+    downloadQueue.value = [];
+    showError(String(e));
+  });
 }
 
 async function removeModel(name: string) {
@@ -667,7 +743,7 @@ async function removeModel(name: string) {
   }
   pendingDelete.value = "";
   window.clearTimeout(pendingDeleteTimer);
-  await invoke("cmd_model_delete", { name }).catch((e) => (status.value = String(e)));
+  await invoke("cmd_model_delete", { name }).catch((e) => showError(String(e)));
   await refreshModelStatus();
   showToast("模型已删除");
 }
@@ -676,16 +752,27 @@ async function changeWhisperModel(e: Event) {
   const v = (e.target as HTMLSelectElement).value;
   whisperModel.value = v;
   await invoke("cmd_set_setting", { key: "whisper_model", value: v }).catch((e) =>
-    (status.value = String(e))
+    showError(String(e))
   );
-  status.value = "识别档位已保存，下次播放生效";
+  showToast("识别档位已保存，下次播放生效");
 }
 
-async function wizardDownloadAll() {
+const MODEL_LABELS: Record<string, string> = {
+  "whisper-small": "识别模型",
+  "whisper-base": "识别模型（快速档）",
+  "translation-engine": "翻译引擎",
+  translation: "翻译模型",
+};
+
+const wizardButtonLabel = computed(() => {
+  if (!wizardDownloading.value) return "下载全部模型（识别 + 本地翻译）";
+  const label = MODEL_LABELS[downloadingName.value] || "模型";
+  return `下载中 ${downloadPct}%（${label}）`;
+});
+
+function wizardDownloadAll() {
   wizardDownloading.value = true;
-  await download("whisper-small");
-  await download("translation");
-  wizardDownloading.value = false;
+  enqueueDownload(["whisper-small", "translation-engine", "translation"]);
 }
 
 async function wizardDismiss() {
@@ -696,12 +783,21 @@ async function wizardDismiss() {
 async function changeEngine(e: Event) {
   const v = (e.target as HTMLSelectElement).value;
   engine.value = v;
-  await invoke("cmd_mt_set_engine", { engine: v }).catch((e) => (status.value = String(e)));
+  await invoke("cmd_mt_set_engine", { engine: v }).catch((e) => showError(String(e)));
+  if (v === "local") showToast("已切换为仅本地翻译：需装好引擎与模型");
+}
+
+// 字幕模式统一入口：右键菜单 / 快捷键 / 设置页都走这里，保证落盘一致
+function setMode(m: "译文" | "原文" | "双语") {
+  if (mode.value === m) return;
+  mode.value = m;
+  void saveSetting("sub_mode", m);
+  showToast(`字幕模式：${m}`);
 }
 
 // ---- 设置项处理器（四组） ----
 async function saveSetting(key: string, value: string) {
-  await invoke("cmd_set_setting", { key, value }).catch((e) => (status.value = String(e)));
+  await invoke("cmd_set_setting", { key, value }).catch((e) => showError(String(e)));
 }
 
 function changeSubFont(e: Event) {
@@ -715,8 +811,7 @@ function changeSubPos(e: Event) {
 }
 
 function changeSubMode(e: Event) {
-  mode.value = (e.target as HTMLSelectElement).value as "译文" | "原文" | "双语";
-  void saveSetting("sub_mode", mode.value);
+  setMode((e.target as HTMLSelectElement).value as "译文" | "原文" | "双语");
 }
 
 function changeAsrLang(e: Event) {
@@ -763,11 +858,18 @@ async function manualCheckUpdate() {
 }
 
 async function openLogDir() {
-  await invoke("cmd_open_log_dir").catch((e) => (status.value = String(e)));
+  await invoke("cmd_open_log_dir").catch((e) => showError(String(e)));
 }
 
 async function openUrl(url: string) {
-  await invoke("cmd_open_url", { url }).catch((e) => (status.value = String(e)));
+  await invoke("cmd_open_url", { url }).catch((e) => showError(String(e)));
+}
+
+function copyFfmpegHint() {
+  navigator.clipboard
+    .writeText("brew install ffmpeg")
+    .then(() => showToast("已复制，粘贴到终端执行后重启应用"))
+    .catch(() => showError("复制失败，请手动输入：brew install ffmpeg"));
 }
 
 // 音量/倍速持久化：音量拖动高频触发，防抖 800ms 落盘
@@ -788,7 +890,7 @@ async function applyPersistedPlayer() {
     await invoke("cmd_player_set_volume", { volume: v }).catch(() => {});
   }
   const sp = Number(await invoke<string>("cmd_get_setting", { key: "speed" }).catch(() => null));
-  if (Number.isFinite(sp) && sp >= 0.1 && sp <= 3) {
+  if (Number.isFinite(sp) && sp >= 0.25 && sp <= 3) {
     speed.value = Math.round(sp * 10) / 10;
     await invoke("cmd_player_set_speed", { speed: speed.value }).catch(() => {});
   }
@@ -796,7 +898,8 @@ async function applyPersistedPlayer() {
 
 async function downloadLocalModel() {
   if (downloading.value) return;
-  await invoke("cmd_model_download", { name: "translation" }).catch((e) => (status.value = String(e)));
+  // 引擎 + 模型二件套：先引擎（12MB）后模型（4.4GB），队列串行
+  enqueueDownload(["translation-engine", "translation"]);
 }
 
 onUnmounted(() => {
@@ -809,7 +912,7 @@ async function togglePause() {
   try {
     paused.value = await invoke<boolean>("cmd_player_toggle_pause");
   } catch (e) {
-    status.value = String(e);
+    showError(String(e));
   }
 }
 
@@ -817,7 +920,7 @@ async function toggleFullscreen() {
   try {
     await invoke("cmd_player_toggle_fullscreen");
   } catch (e) {
-    status.value = String(e);
+    showError(String(e));
   }
 }
 
@@ -827,7 +930,7 @@ async function seekAbsolute(t: number) {
     timePos.value = t;
     displayTime.value = t;
   } catch (e) {
-    status.value = String(e);
+    showError(String(e));
   }
 }
 
@@ -840,10 +943,9 @@ async function seekBy(delta: number) {
 async function screenshot() {
   try {
     const p = await invoke<string>("cmd_player_screenshot");
-    showToast(`截图已保存到桌面`);
-    void p;
+    showToast(`截图已保存：${String(p).split("/").pop() || "桌面"}`);
   } catch (e) {
-    status.value = String(e);
+    showError(String(e));
   }
 }
 
@@ -882,15 +984,27 @@ async function saveExportedSrt(srt: string) {
     defaultPath: exportDefaultPath.value,
     filters: [{ name: "SRT 字幕", extensions: ["srt"] }],
   });
-  if (!target) return;
-  await invoke("cmd_export_srt", { path: target, content: srt }).catch((e) => (status.value = String(e)));
+  if (!target) {
+    // 保存对话框点取消：自动落到桌面兜底——全片识别可能等了几十分钟到几小时，
+    // 不能因为一次误点就全部丢弃
+    const auto = await invoke<string>("cmd_export_srt_auto", {
+      content: srt,
+      videoPath: videoPath.value,
+    }).catch(() => null);
+    if (auto) showToast(`已自动保存到桌面：${String(auto).split("/").pop()}`);
+    else showError("字幕未能保存，请重新导出");
+    return;
+  }
+  await invoke("cmd_export_srt", { path: target, content: srt }).catch((e) =>
+    showError(String(e))
+  );
   showToast("字幕已保存");
 }
 
 async function changeVolume(e: Event) {
   const v = Number((e.target as HTMLInputElement).value);
   volume.value = v;
-  await invoke("cmd_player_set_volume", { volume: v }).catch((e) => (status.value = String(e)));
+  await invoke("cmd_player_set_volume", { volume: v }).catch((e) => showError(String(e)));
   persistVolumeDebounced();
 }
 
@@ -899,11 +1013,12 @@ function fmtSpeed(s: number): string {
 }
 
 async function setSpeed(s: number) {
-  // 0.1 步进、钳制 0.1~3，四舍五入消除浮点误差
-  const next = Math.min(3, Math.max(0.1, Math.round(s * 10) / 10));
+  // 0.1 步进、钳制 0.25~3（mpv 端下限 0.25，钳到一致避免 UI 显示 0.1 实际 0.25），
+  // 四舍五入消除浮点误差
+  const next = Math.min(3, Math.max(0.25, Math.round(s * 10) / 10));
   speed.value = next;
   speedPopOpen.value = false;
-  await invoke("cmd_player_set_speed", { speed: next }).catch((e) => (status.value = String(e)));
+  await invoke("cmd_player_set_speed", { speed: next }).catch((e) => showError(String(e)));
   if (rememberPlayer.value) {
     void invoke("cmd_set_setting", { key: "speed", value: String(next) }).catch(() => {});
   }
@@ -992,17 +1107,26 @@ async function onDrop(e: DragEvent) {
 }
 
 async function loadVideo(path: string) {
-  status.value = `加载中…`;
+  // 换片先清空上一部的字幕/错误状态：旧片字幕串到新片、红条永不清除都是这个坑
+  subs.value = [];
+  translations.value = [];
+  asrError.value = "";
+  recognizing.value = null;
+  errorBar.value = "";
+  status.value = "加载中…";
   try {
     await invoke("cmd_player_load", { path });
     videoPath.value = path;
     filename.value = path.split("/").pop() || path;
     loaded.value = true;
+    status.value = "";
     // 记住本次播放的文件（启动恢复用）+ 回放记忆的音量倍速
     void invoke("cmd_set_setting", { key: "last_video", value: path }).catch(() => {});
     void applyPersistedPlayer();
   } catch (e) {
-    status.value = String(e);
+    // 同步失败（mpv 初始化/loadfile 被拒）：停在欢迎页并给出可见报错
+    status.value = "";
+    showError(String(e));
   }
 }
 
@@ -1016,6 +1140,13 @@ function onStageClick() {
 }
 
 function onKey(e: KeyboardEvent) {
+  // 不抢系统/应用快捷键：⌘S、⌘F、Ctrl+C 等组合键一律放行
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  onUiActivity(); // 纯键盘操作也要唤醒自动隐藏的控制栏
+  if (settingsOpen.value) {
+    if (e.key === "Escape") settingsOpen.value = false;
+    return; // 设置开着时不响应播放快捷键（1/2/3、空格会误触）
+  }
   if (!loaded.value) return;
   switch (e.key) {
     case " ":
@@ -1023,13 +1154,13 @@ function onKey(e: KeyboardEvent) {
       togglePause();
       break;
     case "1":
-      mode.value = "译文";
+      setMode("译文");
       break;
     case "2":
-      mode.value = "原文";
+      setMode("原文");
       break;
     case "3":
-      mode.value = "双语";
+      setMode("双语");
       break;
     case "ArrowLeft":
       seekBy(-5);
@@ -1073,7 +1204,7 @@ function onKey(e: KeyboardEvent) {
 
 async function changeVolumeTo(v: number) {
   volume.value = v;
-  await invoke("cmd_player_set_volume", { volume: v }).catch((e) => (status.value = String(e)));
+  await invoke("cmd_player_set_volume", { volume: v }).catch((e) => showError(String(e)));
   persistVolumeDebounced();
 }
 
@@ -1283,6 +1414,14 @@ onMounted(async () => {
   line-height: 1.8;
   font-size: 12px;
   color: #b9b9c4;
+}
+
+.wizard-text code {
+  background: rgba(255, 255, 255, 0.12);
+  padding: 1px 6px;
+  border-radius: 4px;
+  color: #ffe1a1;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
 }
 
 .btn {
@@ -1628,12 +1767,53 @@ onMounted(async () => {
   width: 100%;
 }
 
-/* 本地模型下载引导条 */
-.cta-bar {
+/* 通知区：错误条/引导条/更新条纵向堆叠，避免同位互相遮挡 */
+.notices {
   position: absolute;
   top: 50px;
   left: 50%;
   transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  z-index: 15;
+  pointer-events: none;
+  max-width: 86%;
+}
+
+.notices > div {
+  pointer-events: auto;
+}
+
+/* 全局错误条：错误曾只显示在欢迎页一行小字里，播放中完全不可见 */
+.err-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px 8px 16px;
+  border-radius: 10px;
+  background: rgba(110, 28, 28, 0.92);
+  border: 1px solid rgba(255, 130, 130, 0.45);
+  font-size: 12px;
+  color: #ffd9d9;
+}
+
+.err-close {
+  background: none;
+  border: none;
+  color: rgba(255, 217, 217, 0.7);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 4px;
+}
+
+.err-close:hover {
+  color: #fff;
+}
+
+/* 本地模型下载引导条 */
+.cta-bar {
   display: flex;
   align-items: center;
   gap: 12px;
@@ -1648,10 +1828,6 @@ onMounted(async () => {
 
 /* 新版本提示条 */
 .update-bar {
-  position: absolute;
-  top: 50px;
-  left: 50%;
-  transform: translateX(-50%);
   display: flex;
   align-items: center;
   gap: 12px;
@@ -1661,7 +1837,6 @@ onMounted(async () => {
   border: 1px solid rgba(121, 169, 255, 0.4);
   font-size: 12px;
   color: #cfe1ff;
-  z-index: 15;
 }
 
 .btn.small {

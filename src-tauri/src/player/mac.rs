@@ -60,6 +60,7 @@ unsafe extern "C" {
     ) -> i32;
     fn mpv_wait_event(ctx: *mut c_void, timeout: c_double) -> *mut mpv_event;
     fn mpv_create_client(ctx: *mut c_void, name: *const c_char) -> *mut c_void;
+    fn mpv_error_string(error: c_int) -> *const c_char;
     #[allow(dead_code)]
     fn mpv_terminate_destroy(ctx: *mut c_void);
 
@@ -144,15 +145,23 @@ struct mpv_event_log_message {
     log_level: c_int,
 }
 
+#[repr(C)]
+struct mpv_event_end_file {
+    reason: i64,
+    error: c_int,
+}
+
 const MPV_FORMAT_INT64: c_int = 4;
 const MPV_FORMAT_FLAG: c_int = 3;
 const MPV_FORMAT_DOUBLE: c_int = 5;
 
 const MPV_EVENT_SHUTDOWN: c_int = 1;
 const MPV_EVENT_LOG_MESSAGE: c_int = 2;
+const MPV_EVENT_END_FILE: c_int = 7;
 const MPV_EVENT_FILE_LOADED: c_int = 8;
 const MPV_EVENT_SEEK: c_int = 20;
 const MPV_EVENT_PROPERTY_CHANGE: c_int = 22;
+const MPV_END_FILE_REASON_ERROR: i64 = 4;
 
 // ---------- 全局状态 ----------
 struct MpvPtr(*mut c_void);
@@ -572,6 +581,26 @@ unsafe fn event_loop(app: AppHandle, client: MpvPtr) {
                     crate::asr::set_playback_pos(&app, t);
                     crate::asr::on_seek(&app, t);
                 }
+                MPV_EVENT_END_FILE => {
+                    // 播放失败（解码失败/文件损坏）只在 END_FILE reason=error 里上报——
+                    // loadfile 命令本身几乎总是成功，坏文件是异步失败的
+                    let d = (*ev).data as *mut mpv_event_end_file;
+                    if d.is_null() || (*d).reason != MPV_END_FILE_REASON_ERROR {
+                        continue;
+                    }
+                    let reason = if (*d).error < 0 {
+                        CStr::from_ptr(mpv_error_string((*d).error)).to_string_lossy().into_owned()
+                    } else {
+                        String::new()
+                    };
+                    let msg = if reason.is_empty() {
+                        "该视频无法播放（格式不受支持或文件损坏），请换一个文件试试".to_string()
+                    } else {
+                        format!("该视频无法播放（{reason}），请换一个文件试试")
+                    };
+                    log::error!("[player] {msg}");
+                    let _ = app.emit("player://error", msg);
+                }
                 _ => {}
             }
         }
@@ -653,61 +682,65 @@ pub fn player_load(app: &AppHandle, path: String) -> Result<(), String> {
     // 字幕先嗅探转码
     let subs: Vec<PathBuf> = sniff_subs(&video).iter().map(|p| ensure_utf8(p)).collect();
 
+    // 主线程闭包内的失败要透传给前端（此前 ensure_mpv/loadfile 失败只写日志，
+    // 前端以为加载成功——用户面对透明窗口零提示）
+    let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
     let app_h = app.clone();
     app.run_on_main_thread(move || {
         let app = &app_h;
-        let window = match app.get_webview_window("main") {
-            Some(w) => w,
-            None => return,
-        };
-        let ctx = match ensure_mpv(&window) {
-            Ok(c) => c,
-            Err(e) => {
-                log::error!("[player] {e}");
-                return;
-            }
-        };
-
-        // 事件线程 + 属性观察只挂一次（进程生命周期内只有一个 mpv 实例）
-        // 注意：mpv 的属性变化事件只投递给「观察它的句柄」——必须观察在
-        // client 上（事件线程 drain 的就是它）。挂在主 handle 上事件永远
-        // 出不来（v0.2.0 及之前的时间/时长/暂停推送全是死的，血泪教训）。
-        static INIT: std::sync::Once = std::sync::Once::new();
-        INIT.call_once(|| unsafe {
-            let client_name = c"livesub-events";
-            let client = mpv_create_client(ctx, client_name.as_ptr());
-            if client.is_null() {
-                log::error!("[player] 事件 client 创建失败");
-            } else {
-                mpv_request_log_messages(client, c"info".as_ptr());
-                for (name, fmt) in [
-                    (c"time-pos", MPV_FORMAT_DOUBLE),
-                    (c"duration", MPV_FORMAT_DOUBLE),
-                    (c"pause", MPV_FORMAT_FLAG),
-                ] {
-                    mpv_observe_property(client, 0, name.as_ptr(), fmt);
-                }
-                spawn_event_thread(app.clone(), MpvPtr(client));
-            }
-        });
-
-        {
-            let st = app.state::<PlayerState>();
-            *st.pending_subs.lock().unwrap() = subs;
+        let result = load_on_main(app, &path, subs);
+        let _ = tx.send(result.clone());
+        if result.is_ok() {
+            // 实时识别管线启动（模型缺失时只发事件，不影响播放）
+            crate::asr::on_video_start(app, path);
         }
-
-        unsafe {
-            let cpath = CString::new(path.as_str()).unwrap();
-            if cmd(ctx, &[c"loadfile", cpath.as_c_str(), c"replace"]).is_err() {
-                return;
-            }
-        }
-        log::info!("[player] loadfile: {path}");
-
-        // 实时识别管线启动（模型缺失时只发事件，不影响播放）
-        crate::asr::on_video_start(app, path.clone());
     })
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    rx.recv().map_err(|_| "播放内核无响应".to_string())?
+}
+
+/// 在主线程执行的实际加载逻辑（返回 Err 的场景：mpv 初始化失败 / loadfile 被拒）
+fn load_on_main(app: &AppHandle, path: &str, subs: Vec<PathBuf>) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or("主窗口不存在")?;
+    let ctx = ensure_mpv(&window)?;
+
+    // 事件线程 + 属性观察只挂一次（进程生命周期内只有一个 mpv 实例）
+    // 注意：mpv 的属性变化事件只投递给「观察它的句柄」——必须观察在
+    // client 上（事件线程 drain 的就是它）。挂在主 handle 上事件永远
+    // 出不来（v0.2.0 及之前的时间/时长/暂停推送全是死的，血泪教训）。
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| unsafe {
+        let client_name = c"livesub-events";
+        let client = mpv_create_client(ctx, client_name.as_ptr());
+        if client.is_null() {
+            log::error!("[player] 事件 client 创建失败");
+        } else {
+            mpv_request_log_messages(client, c"info".as_ptr());
+            for (name, fmt) in [
+                (c"time-pos", MPV_FORMAT_DOUBLE),
+                (c"duration", MPV_FORMAT_DOUBLE),
+                (c"pause", MPV_FORMAT_FLAG),
+            ] {
+                mpv_observe_property(client, 0, name.as_ptr(), fmt);
+            }
+            spawn_event_thread(app.clone(), MpvPtr(client));
+        }
+    });
+
+    {
+        let st = app.state::<PlayerState>();
+        *st.pending_subs.lock().unwrap() = subs;
+    }
+
+    unsafe {
+        let cpath = CString::new(path).unwrap();
+        cmd(ctx, &[c"loadfile", cpath.as_c_str(), c"replace"])
+            .map_err(|e| format!("无法加载该视频: {e}"))?;
+    }
+    log::info!("[player] loadfile: {path}");
+    Ok(())
 }
 
 // ---------- 控制命令 ----------

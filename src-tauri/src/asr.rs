@@ -113,9 +113,12 @@ fn send(app: &AppHandle, msg: Msg) {
 // ---------- worker ----------
 fn worker(app: AppHandle, rx: Receiver<Msg>) {
     let Some(model_path) = find_model() else {
+        // 关键：把 tx 槽位清空——否则模型下载完成后，后续 Start/Seek 仍发进
+        // 这个已死的通道被静默丢弃，用户必须重启应用才能恢复识别
+        *app.state::<AsrState>().tx.lock().unwrap() = None;
         let _ = app.emit(
             "asr://error",
-            "未找到 whisper 模型：请把 ggml-small.bin 放入 ~/.livesub-player/models/（M4 将提供下载管理）",
+            "未找到识别模型：请在 设置 → 识别·翻译 中下载语音识别模型",
         );
         log::error!("[asr] 模型缺失，识别管线不启动");
         return;
@@ -411,7 +414,7 @@ fn spawn_ffmpeg(path: &str, pos: f64) -> Result<std::process::Child, String> {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .map_err(|e| format!("ffmpeg 启动失败: {e}"))
+        .map_err(|_| "ffmpeg 启动失败：本机未安装 ffmpeg。请在终端执行 brew install ffmpeg 后重启应用".into())
 }
 
 /// 能量 VAD：返回有声帧占比
@@ -457,9 +460,24 @@ fn read_exact_or_eof(r: &mut impl Read, byte_buf: &mut [u8]) -> ReadOutcome {
 fn ffmpeg_path() -> &'static str {
     if PathBuf::from("/opt/homebrew/bin/ffmpeg").is_file() {
         "/opt/homebrew/bin/ffmpeg"
+    } else if PathBuf::from("/usr/local/bin/ffmpeg").is_file() {
+        "/usr/local/bin/ffmpeg"
     } else {
         "ffmpeg"
     }
+}
+
+/// ffmpeg 可用性探测（GUI 从 Finder 启动 PATH 极小，直接 spawn 试一把最可靠）
+pub fn ffmpeg_ok() -> bool {
+    if PathBuf::from("/opt/homebrew/bin/ffmpeg").is_file() || PathBuf::from("/usr/local/bin/ffmpeg").is_file() {
+        return true;
+    }
+    std::process::Command::new("ffmpeg").arg("-version").output().is_ok()
+}
+
+#[tauri::command]
+pub fn cmd_check_ffmpeg() -> bool {
+    ffmpeg_ok()
 }
 
 // ---------- 全片字幕导出（异步识别整个视频 → SRT） ----------

@@ -175,9 +175,15 @@ pub fn cmd_mt_set_engine(app: AppHandle, engine: String) -> Result<(), String> {
     }
     // 重置不可用标记：切引擎给一次重新尝试的机会
     crate::settings::write("mt_engine", &engine)?;
-    app.state::<MtState>().unavailable.store(false, Ordering::Relaxed);
+    reset_unavailable(&app);
     log::info!("[mt] 翻译引擎 → {engine}");
     Ok(())
+}
+
+/// 恢复翻译可用性并通知前端（模型/引擎下载完成后、切引擎时调用）
+pub fn reset_unavailable(app: &AppHandle) {
+    app.state::<MtState>().unavailable.store(false, Ordering::Relaxed);
+    let _ = app.emit("mt://available", ());
 }
 
 #[tauri::command]
@@ -359,18 +365,15 @@ fn ensure_server(app: &AppHandle) -> Result<u16, String> {
     }
 
     let Some(model) = find_model() else {
-        return Err(
-            "未找到翻译模型：请把翻译 GGUF 放入 ~/.livesub-player/models/translation.gguf（M4 将提供下载管理）"
-                .into(),
-        );
+        return Err("未找到本地翻译模型：请在 设置 → 识别·翻译 中下载「本地翻译·混元 MT」（约 4.4GB）".into());
     };
-    if !std::path::Path::new(LLAMA_SERVER).is_file() {
-        return Err("未找到 llama-server（开发期请 brew install llama.cpp）".into());
-    }
+    let Some(engine) = llama_server_path() else {
+        return Err("未找到本地翻译引擎：请在 设置 → 识别·翻译 中下载「本地翻译·引擎」（约 12MB）".into());
+    };
 
     let port = pick_port().ok_or("找不到可用端口")?;
     log::info!("[mt] 拉起 llama-server :{port}（{}）", model.display());
-    let child = std::process::Command::new(LLAMA_SERVER)
+    let child = std::process::Command::new(&engine)
         .args([
             "-m",
             model.to_str().ok_or("模型路径非法")?,
@@ -411,7 +414,15 @@ fn ensure_server(app: &AppHandle) -> Result<u16, String> {
     Err("llama-server 健康检查超时".into())
 }
 
-const LLAMA_SERVER: &str = "/opt/homebrew/bin/llama-server";
+/// llama-server 查找链：应用内下载的引擎优先，其次 Homebrew（开发环境）
+fn llama_server_path() -> Option<PathBuf> {
+    let candidates = [
+        crate::models::engine_bin(),
+        PathBuf::from("/opt/homebrew/bin/llama-server"),
+        PathBuf::from("/usr/local/bin/llama-server"),
+    ];
+    candidates.into_iter().find(|p| p.is_file())
+}
 
 fn pick_port() -> Option<u16> {
     for p in BASE_PORT..BASE_PORT + 10 {
