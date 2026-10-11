@@ -241,15 +241,18 @@
         <div v-else-if="mode !== '原文' && mtAvailable" class="sub-dst pending">译文生成中…</div>
       </div>
 
-      <!-- 识别进度指示（方案 §2.2：进度可见，绝不让人以为卡死） -->
-      <div v-if="loaded && recognizing && !activeSub" class="asr-progress">
-        <template v-if="recognizing.start >= timePos">
-          正在识别 {{ fmtTime(recognizing.start) }} – {{ fmtTime(recognizing.end) }}
-        </template>
-        <template v-else>
-          字幕识别中，已处理到 {{ fmtTime(recognizing.end) }}，请稍候
-        </template>
-      </div>
+      <!-- 识别进度指示（§2.2 进度可见）：只对「有人声且未识别完」的时段出现，
+           5s 无新进度自动消失——静音/对白间隙/识别完成后不再常驻挡画面 -->
+      <transition name="fade">
+        <div v-if="loaded && asrProgressLive && recognizing && !activeSub" class="asr-progress">
+          <template v-if="recognizing.start >= timePos">
+            正在识别 {{ fmtTime(recognizing.start) }} – {{ fmtTime(recognizing.end) }}
+          </template>
+          <template v-else>
+            字幕识别中，已处理到 {{ fmtTime(recognizing.end) }}，请稍候
+          </template>
+        </div>
+      </transition>
       <div v-if="asrError" class="asr-error">{{ asrError }}</div>
 
       <!-- 全片字幕导出进度（异步识别整个视频，可取消） -->
@@ -463,6 +466,9 @@ const wizardDownloading = ref(false);
 const updateInfo = ref<{ current: string; latest: string; hasUpdate: boolean; notes?: string | null } | null>(null);
 const updatePct = ref<number | null>(null); // null=未在更新中
 const recognizing = ref<{ start: number; end: number } | null>(null);
+// 识别指示条存活状态：进度事件后 5s 内为 true，超时自动消失（不再常驻）
+const asrProgressLive = ref(false);
+let asrProgressTimer: number | undefined;
 const asrError = ref("");
 const mode = ref<"译文" | "原文" | "双语">("双语");
 
@@ -588,6 +594,9 @@ onMounted(async () => {
   });
   await listen<{ start: number; end: number }>("asr://progress", (e) => {
     recognizing.value = e.payload;
+    asrProgressLive.value = true;
+    window.clearTimeout(asrProgressTimer);
+    asrProgressTimer = window.setTimeout(() => (asrProgressLive.value = false), 5000);
   });
   await listen<string>("asr://error", (e) => {
     asrError.value = String(e.payload);
@@ -924,6 +933,7 @@ async function downloadLocalModel() {
 onUnmounted(() => {
   unlisten?.();
   window.removeEventListener("keydown", onKey);
+  window.clearTimeout(asrProgressTimer);
 });
 
 // ---- 控制 ----
