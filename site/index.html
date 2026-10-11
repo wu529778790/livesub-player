@@ -5,7 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>LiveSub-Player — 打开视频，字幕跟上</title>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 824 824'%3E%3Cdefs%3E%3ClinearGradient id='bg' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0' stop-color='%23241e2e'/%3E%3Cstop offset='1' stop-color='%23110f16'/%3E%3C/linearGradient%3E%3ClinearGradient id='amber' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0' stop-color='%23ffe3a1'/%3E%3Cstop offset='1' stop-color='%23f2b544'/%3E%3C/linearGradient%3E%3CradialGradient id='glow' cx='0.5' cy='0.34' r='0.6'%3E%3Cstop offset='0' stop-color='%23ffd479' stop-opacity='0.16'/%3E%3Cstop offset='1' stop-color='%23ffd479' stop-opacity='0'/%3E%3C/radialGradient%3E%3C/defs%3E%3Crect width='824' height='824' rx='185' fill='url(%23bg)'/%3E%3Crect width='824' height='824' rx='185' fill='url(%23glow)'/%3E%3Crect x='1.5' y='1.5' width='821' height='821' rx='183.5' fill='none' stroke='%23ffffff' stroke-opacity='0.08' stroke-width='3'/%3E%3Crect x='252' y='200' width='320' height='320' rx='84' fill='url(%23amber)'/%3E%3Cpath d='M366 286 L498 360 L366 434 Z' fill='%231b1520'/%3E%3Crect x='282' y='560' width='260' height='32' rx='16' fill='%23ffffff' fill-opacity='0.88'/%3E%3Crect x='327' y='608' width='170' height='32' rx='16' fill='%23ffd479'/%3E%3C/svg%3E" />
-<meta name="description" content="跨平台桌面播放器：whisper 实时语音识别生成双语字幕，在线/本地混合翻译，安装包不到 30 MB，全离线兜底。" />
+<meta name="description" content="macOS 桌面播放器（Apple Silicon）：whisper 实时语音识别生成双语字幕，在线/本地混合翻译，安装包约 30 MB，全离线兜底。" />
+<meta property="og:title" content="LiveSub-Player — 打开视频，字幕跟上" />
+<meta property="og:description" content="whisper 实时识别生成双语字幕，在线/本地混合翻译，安装包约 30 MB。" />
+<meta property="og:type" content="website" />
+<meta property="og:url" content="https://livesub-player.shenzjd.com/" />
+<meta property="og:image" content="https://livesub-player.shenzjd.com/app-icon.png" />
+<meta name="twitter:card" content="summary" />
+<link rel="canonical" href="https://livesub-player.shenzjd.com/" />
 <style>
   :root {
     --bg: #ffffff;
@@ -242,6 +249,7 @@
       <a href="#how">工作原理</a>
       <a href="#install">安装</a>
       <a href="#faq">常见问题</a>
+      <a href="https://github.com/wu529778790/livesub-player/issues" target="_blank">反馈</a>
       <a href="https://github.com/wu529778790/livesub-player" target="_blank">GitHub</a>
     </div>
     <a class="nav-cta" href="https://github.com/wu529778790/livesub-player/releases/latest" target="_blank">↓ 免费下载</a>
@@ -303,8 +311,9 @@
     <div class="grid">
       <div class="card"><div class="icon">🎯</div><h3>实时字幕</h3><p>whisper 在后台边播边识别，进度实时可见——「正在识别 xx:xx–xx:xx」，绝不让你以为卡死。静音段自动跳过，幻觉文本多重过滤。</p></div>
       <div class="card"><div class="icon">🔀</div><h3>三模式一键切换</h3><p>译文（看剧）/ 原文（对照）/ 双语（学习），按键 1 / 2 / 3 随手切。翻译未就绪时原文先上屏，看剧永不停。</p></div>
-      <div class="card"><div class="icon">🌐</div><h3>混合翻译</h3><p>在线免费翻译默认优先，秒回零算力；被内容过滤或断网时，自动落回本地模型——全离线、无视屏蔽。</p></div>
-      <div class="card"><div class="icon">📦</div><h3>轻量安装包</h3><p>安装包不到 30 MB：libmpv 运行时内嵌，模型（识别 ~466MB / 本地翻译 ~4.4GB）按需下载、断点续传。</p></div>
+      <div class="card"><div class="icon">🌐</div><h3>混合翻译</h3><p>在线免费翻译默认优先，秒回零算力；被内容过滤或断网时，自动落回本地模型——全离线、无视屏蔽。引擎与模型应用内一键下载。</p></div>
+      <div class="card"><div class="icon">📦</div><h3>轻量安装包</h3><p>安装包约 30 MB：libmpv 运行时内嵌，翻译引擎（~12MB）与模型（识别 ~466MB / 本地翻译 ~4.4GB）按需下载、断点续传。</p></div>
+      <div class="card"><div class="icon">💾</div><h3>全片字幕导出</h3><p>看中的片子想留档？一键把全片识别为 SRT 落盘，异步后台跑、进度可见、随时取消，保存位置自选。</p></div>
       <div class="card"><div class="icon">🗺️</div><h3>现成字幕优先</h3><p>视频同目录有 SRT/ASS 就直接加载（自动嗅探编码，GBK 不乱码）；没有的话实时字幕随时顶上。</p></div>
       <div class="card"><div class="icon">🛡️</div><h3>干净的退出</h3><p>拉起的所有子进程（翻译服务、音频抽取）随主程序退出全部收割，绝不留后台。</p></div>
     </div>
@@ -326,27 +335,27 @@
 <section id="install" class="alt">
   <div class="wrap">
     <h2>安装</h2>
-    <p class="section-sub">macOS（Apple Silicon）：三种方式任选，装完双击即开</p>
+    <p class="section-sub">macOS（Apple Silicon）：两步——先装 ffmpeg（字幕识别依赖），再装应用</p>
     <div class="faq">
       <details open>
+        <summary>第 0 步：安装 ffmpeg（字幕识别依赖）</summary>
+        <p>终端执行 <code>brew install ffmpeg</code>。播放功能不依赖它，但没有它无法生成字幕；应用启动时也会检测并引导。</p>
+      </details>
+      <details open>
         <summary>方式一：一键脚本（推荐）</summary>
-        <p>终端执行 <code>curl -fsSL https://raw.githubusercontent.com/wu529778790/livesub-player/main/install.sh | bash</code>。命令行下载不带隔离标记，安装完直接打开，无任何提示。指定版本：<code>| bash -s -- v0.2.2</code>。</p>
+        <p>终端执行 <code>curl -fsSL https://raw.githubusercontent.com/wu529778790/livesub-player/main/install.sh | bash</code>。命令行下载不带隔离标记，安装完直接打开，无任何提示。指定版本：<code>| bash -s -- v1.0.0</code>（仓库仅保留最近 3 个版本）。</p>
       </details>
       <details>
-        <summary>方式二：Homebrew</summary>
-        <p><code>brew tap wu529778790/tap https://github.com/wu529778790/homebrew-tap && brew install --cask livesub-player</code>。之后 <code>brew upgrade --cask livesub-player</code> 跟版本走。</p>
-      </details>
-      <details>
-        <summary>方式三：手动下载</summary>
+        <summary>方式二：手动下载</summary>
         <p>从 <a href="https://github.com/wu529778790/livesub-player/releases">Releases</a> 下载 <code>*-macOS.zip</code> 解压，拖进「应用程序」。浏览器下载带隔离标记，首次打开：<b>右键 → 打开 → 再点打开</b>（只需一次）；或终端执行 <code>xattr -cr /Applications/LiveSub-Player.app</code>。</p>
       </details>
       <details>
         <summary>首次启动要下载什么？</summary>
-        <p>首次使用向导会引导下载语音识别模型（~466MB，small 均衡档，也可选 base 快速档）。在线翻译开箱即用；想要全离线/无屏蔽的本地翻译，可再下载混元 MT-7B 模型（~4.4GB，断点续传）。</p>
+        <p>首次使用向导会引导下载语音识别模型（~466MB，small 均衡档，也可选 base 快速档）。在线翻译开箱即用；想要全离线/无屏蔽的本地翻译，一键下载翻译引擎（~12MB）+ 混元 MT-7B 模型（~4.4GB），全程断点续传。</p>
       </details>
       <details>
         <summary>Windows / Linux 版呢？</summary>
-        <p>安装包已可构建（CI 每次提交自动验证），播放内核接入中——先下载仅能体验界面。关注 Releases 获取更新。</p>
+        <p>在做了——播放内核接入后开放下载。当前 Releases <b>不提供</b> Windows/Linux 安装包（装了也无法播放视频，所以干脆不上架）。可以先 Watch 仓库等通知。</p>
       </details>
       <details>
         <summary>和找现成字幕比，体验差在哪？</summary>
@@ -363,7 +372,7 @@
     <div class="faq">
       <details>
         <summary>在线翻译被内容过滤了怎么办？</summary>
-        <p>这正是本地模型存在的意义：设置页一键下载混元 MT-7B（~4.4GB），翻译完全在本地进行，离线可用、无任何内容屏蔽。</p>
+        <p>这正是本地模型存在的意义：设置页一键下载翻译引擎（~12MB）+ 混元 MT-7B（~4.4GB），翻译完全在本地进行，离线可用、无任何内容屏蔽。</p>
       </details>
       <details>
         <summary>为什么安装包这么小？</summary>
@@ -372,6 +381,14 @@
       <details>
         <summary>会采集我的数据吗？</summary>
         <p>识别永远在本地。使用在线翻译时，字幕文本会发送给翻译服务——介意的话切到「仅本地模型」引擎，全程断网也能用。</p>
+      </details>
+      <details>
+        <summary>数据流向明细（隐私说明）</summary>
+        <p>① 视频内容与语音识别：全部在本机完成，不出机器。② 在线翻译：字幕文本发往 Google 翻译接口（走系统代理，若有）。③ 本地翻译：模型与推理都在本机，零外传。④ 模型下载：走 hf-mirror / GitHub。⑤ 更新检查：向 GitHub Releases 发版本号查询。⑥ 日志：只落在你本机的日志目录，用于排查问题，由你决定是否发给开发者。除此之外无任何遥测、无账号体系。</p>
+      </details>
+      <details>
+        <summary>遇到问题怎么反馈？</summary>
+        <p>到 <a href="https://github.com/wu529778790/livesub-player/issues" target="_blank">GitHub Issues</a> 提交，附上「设置 → 通用 → 打开日志文件夹」里的最新 .log 文件，通常一轮就能定位。</p>
       </details>
     </div>
   </div>
@@ -383,10 +400,11 @@
     <p class="section-sub">进度见 GitHub 项目与 Releases</p>
     <ul class="roadmap">
       <li><span class="done">✔</span> 实时字幕管线 + 播放内核（macOS）</li>
-      <li><span class="done">✔</span> 在线/本地混合翻译 + 模型下载管理</li>
+      <li><span class="done">✔</span> 在线/本地混合翻译 + 模型/引擎下载管理</li>
+      <li><span class="done">✔</span> 全片字幕导出 SRT（异步识别，进度可见）</li>
       <li><span class="doing">●</span> Windows / Linux 播放内核接入</li>
       <li><span class="doing">●</span> 网络流播放（URL / m3u8）</li>
-      <li><span class="todo">○</span> 播放列表、字幕导出 SRT</li>
+      <li><span class="todo">○</span> 播放列表、导出双语字幕</li>
       <li><span class="todo">○</span> 「学习模式」：点击查词、生词本</li>
     </ul>
   </div>
@@ -394,7 +412,7 @@
 
 <footer>
   <div class="wrap">
-    <p>LiveSub-Player · 打开视频，字幕跟上 · <a href="https://github.com/wu529778790/livesub-player" target="_blank">GitHub</a> · <a href="https://github.com/wu529778790/livesub-player/releases" target="_blank">下载</a></p>
+    <p>LiveSub-Player · 打开视频，字幕跟上 · <a href="https://github.com/wu529778790/livesub-player" target="_blank">GitHub</a> · <a href="https://github.com/wu529778790/livesub-player/releases" target="_blank">下载</a> · <a href="https://github.com/wu529778790/livesub-player/issues" target="_blank">反馈</a> · <a href="https://github.com/wu529778790/livesub-player/blob/main/LICENSE" target="_blank">禁止商用许可</a></p>
   </div>
 </footer>
 
