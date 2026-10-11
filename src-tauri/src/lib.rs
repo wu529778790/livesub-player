@@ -1,9 +1,12 @@
 mod asr;
 mod export;
+mod history;
+mod menu;
 mod models;
 mod mt;
 mod player;
 mod settings;
+mod transcript;
 mod update;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -38,14 +41,17 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(player::PlayerState::default())
         .manage(asr::AsrState::default())
-        .manage(asr::ExportState::default())
+        .manage(asr::CompletionState::default())
         .manage(mt::MtState::default())
         .manage(models::ModelsState::default())
+        .manage(transcript::TranscriptState::default())
         .manage(update::UpdateState::default())
         .invoke_handler(tauri::generate_handler![
             player::cmd_player_load,
             player::cmd_player_toggle_pause,
             player::cmd_player_seek,
+            player::cmd_player_stop,
+            player::cmd_scan_folder,
             player::cmd_player_set_volume,
             player::cmd_player_set_speed,
             player::cmd_player_toggle_fullscreen,
@@ -60,6 +66,10 @@ pub fn run() {
             settings::cmd_set_setting,
             settings::cmd_open_log_dir,
             settings::cmd_open_url,
+            history::cmd_history_get,
+            history::cmd_history_record,
+            history::cmd_history_list,
+            transcript::cmd_transcript_get,
             export::cmd_export_srt,
             export::cmd_export_srt_auto,
             asr::cmd_export_full_srt,
@@ -81,43 +91,12 @@ pub fn run() {
                     .unwrap_or_else(|_| "未知".into()),
             );
 
-            // 标准应用菜单：macOS 上提供 ⌘Q 退出/⌘C⌘V 编辑/最小化全屏关闭等系统默认行为；
-            // 没有菜单时 Tauri 应用不响应 ⌘Q（用户预期）
+            // macOS 菜单栏 = 命令中心（文件/播放/字幕），点击统一转发前端分发；
+            // 「打开最近使用」随观看历史动态重建。菜单结构见 menu.rs。
             #[cfg(target_os = "macos")]
             {
-                use tauri::menu::{MenuBuilder, SubmenuBuilder};
-                let app_submenu = SubmenuBuilder::new(app, "LiveSub-Player")
-                    .about(None)
-                    .separator()
-                    .services()
-                    .separator()
-                    .hide()
-                    .hide_others()
-                    .show_all()
-                    .separator()
-                    .quit()
-                    .build()?;
-                let edit_submenu = SubmenuBuilder::new(app, "编辑")
-                    .undo()
-                    .redo()
-                    .separator()
-                    .cut()
-                    .copy()
-                    .paste()
-                    .select_all()
-                    .build()?;
-                let window_submenu = SubmenuBuilder::new(app, "窗口")
-                    .minimize()
-                    .fullscreen()
-                    .separator()
-                    .close_window()
-                    .build()?;
-                let menu = MenuBuilder::new(app)
-                    .item(&app_submenu)
-                    .item(&edit_submenu)
-                    .item(&window_submenu)
-                    .build()?;
-                app.set_menu(menu)?;
+                menu::refresh(app.handle());
+                menu::on_menu_event(app.handle());
             }
             // 非 macOS：最小菜单保证 Ctrl+Q 可退出
             #[cfg(not(target_os = "macos"))]
@@ -126,6 +105,28 @@ pub fn run() {
                 let quit = MenuItem::with_id(app, "app-quit", "退出", true, Some("Ctrl+Q"))?;
                 let menu = MenuBuilder::new(app).items(&[&quit]).build()?;
                 app.set_menu(menu)?;
+            }
+
+            // 旧版「全局单槽上次播放」迁移为按文件的历史记录
+            history::migrate_from_legacy_settings();
+
+            // SIGTERM/SIGINT 收割：⌘Q 走 RunEvent::Exit（有收割），但强杀/watcher 重启/
+            // 活动监视器走信号路径——不接住的话 llama-server（4.4GB）会变孤儿
+            //（日志实锤：端口 18434→18437 递增 = 旧实例未被收割）
+            #[cfg(unix)]
+            {
+                use signal_hook::consts::{SIGINT, SIGTERM};
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    if let Ok(mut signals) = signal_hook::iterator::Signals::new([SIGTERM, SIGINT]) {
+                        for sig in signals.forever() {
+                            log::info!("[app] 收到信号 {sig}，收割子进程并落盘后退出");
+                            mt::shutdown(&handle);
+                            transcript::flush_current(&handle);
+                            std::process::exit(0);
+                        }
+                    }
+                });
             }
 
             // 自动化验证钩子：LIVESUB_AUTO_PLAY=/path/to.mp4 启动即加载（仅 macOS 已接播放内核）
@@ -160,9 +161,10 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("LiveSub-Player 构建失败")
         .run(|app_handle, event| {
-            // 方案 §4.4：退出即干净——收割 llama-server sidecar
+            // 方案 §4.4：退出即干净——收割 llama-server sidecar，字幕/翻译缓存兜底落盘
             if let tauri::RunEvent::Exit = event {
                 mt::shutdown(app_handle);
+                transcript::flush_current(app_handle);
             }
         });
 }

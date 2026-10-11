@@ -1,23 +1,31 @@
 //! M2 实时识别管线（技术方案 §4.1，项目灵魂模块）
 //!
 //! 架构：
-//! - 单 worker 线程持有 whisper 上下文（模型只加载一次，0.14s）
+//! - 单 worker 线程持有 whisper 上下文（模型只加载一次，0.14s）；全片补全共用同
+//!   一份上下文（Arc），不重复加载 ~466MB 模型
 //! - ffmpeg 常驻进程管道输出 16k mono f32（方案拍板：常驻管道为主，不逐段 spawn）
 //!   `-ss` 置于 `-i` 前 + accurate seek：时间戳以 ffmpeg 输出为基准，不用播放时钟累加
 //! - 能量 VAD（M2.0 简化）：整窗静音直接跳过不进 whisper；silero-vad(ort) 留 M2.1 替换
 //! - 调度：识别是软实时——领先播放 >30s 就等；seek/换片杀管道重启会话
-//! - 幂等：会话内窗口顺序唯一；seek 即换会话重置，不重复识别
+//! - 幂等：识别结果与「已识别区间」入字幕库（transcript.rs），实时会话跳过已识别
+//!   窗——seek 回看、重开视频直接命中；后台补全只跑空洞
+//!
+//! 全片补全（CompletionState）：后台模式 = 打开视频后从字幕库空洞处补识别，实时
+//! 会话优先（让出其识别邻域、CPU 降优先级），目标全片字幕就绪；导出模式 = 同一
+//! 条识别通路 + 进度/取消，跑完直接从字幕库构建 SRT（不再单独加载第二份模型）。
 
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+
+use crate::transcript::{Seg, TranscriptShared};
 
 const SAMPLE_RATE: usize = 16000;
 /// 识别窗口 12s（方案 §4.1：单段上限 ~15s 内）
@@ -28,6 +36,12 @@ const VAD_RMS_GATE: f32 = 0.008;
 const VAD_MIN_SPEECH_RATIO: f32 = 0.02;
 /// 追帧不追播：识别位置领先播放超过该值就等待
 const AHEAD_LIMIT_SEC: f64 = 30.0;
+/// 后台补全让出实时识别正在处理的邻域（识别前沿 ± 该值），避免两个 worker 抢同一段
+const FRONTIER_CLEARANCE_SEC: f64 = 15.0;
+/// 实时会话推理线程数（spike-2 实测 2 线程即够 RTF≤0.15，留余量）
+const RT_THREADS: i32 = 4;
+/// 后台补全推理线程数（不与实时会话抢满核）
+const BG_THREADS: i32 = 2;
 
 // ---------- 全局状态 ----------
 pub struct AsrState {
@@ -35,6 +49,10 @@ pub struct AsrState {
     current_path: Mutex<String>,
     /// 播放位置（毫秒），player 事件线程持续更新
     playback_pos_ms: AtomicU64,
+    /// 实时识别推进到的位置（毫秒）：后台补全让出该邻域
+    frontier_ms: AtomicU64,
+    /// 实时会话是否存活（读到 EOF/出错即结束）：结束后后台补全不再让路
+    session_active: AtomicBool,
 }
 
 impl Default for AsrState {
@@ -43,6 +61,8 @@ impl Default for AsrState {
             tx: Mutex::new(None),
             current_path: Mutex::new(String::new()),
             playback_pos_ms: AtomicU64::new(0),
+            frontier_ms: AtomicU64::new(0),
+            session_active: AtomicBool::new(false),
         }
     }
 }
@@ -50,6 +70,8 @@ impl Default for AsrState {
 enum Msg {
     Start { path: String, pos: f64 },
     Seek { pos: f64 },
+    /// 播放器停止/关片：结束当前识别会话（worker 存活，等下一次 Start）
+    StopSession,
     /// 预留：优雅退出 worker（当前进程退出即回收）
     #[allow(dead_code)]
     Shutdown,
@@ -60,6 +82,8 @@ enum Poll {
     None,
     /// 重启会话（新位置，可选换文件）
     Restart { pos: f64, path: Option<String> },
+    /// 结束当前会话但 worker 保留（关片）
+    StopSession,
     Stop,
 }
 
@@ -85,17 +109,46 @@ pub fn set_playback_pos(app: &AppHandle, t: f64) {
         .store((t * 1000.0).max(0.0) as u64, Ordering::Relaxed);
 }
 
+/// 当前播放位置（秒）——翻译 worker 做就近优先调度用
+pub fn playback_pos(app: &AppHandle) -> f64 {
+    app.state::<AsrState>()
+        .playback_pos_ms
+        .load(Ordering::Relaxed) as f64
+        / 1000.0
+}
+
+fn set_frontier(app: &AppHandle, t: f64) {
+    app.state::<AsrState>()
+        .frontier_ms
+        .store((t * 1000.0).max(0.0) as u64, Ordering::Relaxed);
+}
+
 pub fn on_video_start(app: &AppHandle, path: String) {
     {
         let st = app.state::<AsrState>();
         *st.current_path.lock().unwrap() = path.clone();
         st.playback_pos_ms.store(0, Ordering::Relaxed);
+        st.frontier_ms.store(0, Ordering::Relaxed);
     }
+    // 字幕库随播放会话就位（识别结果入库、已识别区间跳过都靠它）
+    crate::transcript::open_current(app, &path);
     send(app, Msg::Start { path, pos: 0.0 });
 }
 
 pub fn on_seek(app: &AppHandle, pos: f64) {
+    set_frontier(app, pos);
     send(app, Msg::Seek { pos });
+}
+
+/// 播放器停止/关片：结束当前识别会话（worker 保留，等下一次 Start）
+pub fn on_stop(app: &AppHandle) {
+    {
+        let st = app.state::<AsrState>();
+        *st.current_path.lock().unwrap() = String::new();
+        st.playback_pos_ms.store(0, Ordering::Relaxed);
+        st.frontier_ms.store(0, Ordering::Relaxed);
+    }
+    send(app, Msg::StopSession);
 }
 
 fn send(app: &AppHandle, msg: Msg) {
@@ -110,37 +163,55 @@ fn send(app: &AppHandle, msg: Msg) {
     let _ = tx_slot.as_ref().unwrap().send(msg);
 }
 
-// ---------- worker ----------
-fn worker(app: AppHandle, rx: Receiver<Msg>) {
+// ---------- 共享 whisper 上下文 ----------
+// 实时会话与全片补全共用一份模型（模型只加载一次；旧实现导出要再加载第二份）。
+// 档位切换沿用旧行为：重启应用生效。
+static SHARED_CTX: Mutex<Option<Arc<WhisperContext>>> = Mutex::new(None);
+
+fn get_ctx() -> Result<Arc<WhisperContext>, String> {
+    let mut slot = SHARED_CTX.lock().unwrap();
+    if let Some(c) = slot.as_ref() {
+        return Ok(c.clone());
+    }
     let Some(model_path) = find_model() else {
-        // 关键：把 tx 槽位清空——否则模型下载完成后，后续 Start/Seek 仍发进
-        // 这个已死的通道被静默丢弃，用户必须重启应用才能恢复识别
-        *app.state::<AsrState>().tx.lock().unwrap() = None;
-        let _ = app.emit(
-            "asr://error",
-            "未找到识别模型：请在 设置 → 识别·翻译 中下载语音识别模型",
-        );
-        log::error!("[asr] 模型缺失，识别管线不启动");
-        return;
+        return Err("未找到识别模型：请在 设置 → 识别·翻译 中下载语音识别模型".into());
     };
     let t0 = Instant::now();
-    let ctx = match WhisperContext::new_with_params(&model_path.to_string_lossy(), WhisperContextParameters::default())
-    {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = app.emit("asr://error", format!("whisper 模型加载失败: {e}"));
-            return;
-        }
-    };
+    let ctx = WhisperContext::new_with_params(
+        &model_path.to_string_lossy(),
+        WhisperContextParameters::default(),
+    )
+    .map_err(|e| format!("whisper 模型加载失败: {e}"))?;
     log::info!(
         "[asr] 模型加载完成 {:.2}s（{}）",
         t0.elapsed().as_secs_f64(),
         model_path.display()
     );
+    let arc = Arc::new(ctx);
+    *slot = Some(arc.clone());
+    Ok(arc)
+}
+
+// ---------- worker ----------
+fn worker(app: AppHandle, rx: Receiver<Msg>) {
+    let ctx = match get_ctx() {
+        Ok(c) => c,
+        Err(e) => {
+            // 关键：把 tx 槽位清空——否则模型下载完成后，后续 Start/Seek 仍发进
+            // 这个已死的通道被静默丢弃，用户必须重启应用才能恢复识别
+            *app.state::<AsrState>().tx.lock().unwrap() = None;
+            let _ = app.emit("asr://error", e);
+            log::error!("[asr] 模型缺失，识别管线不启动");
+            return;
+        }
+    };
 
     while let Ok(msg) = rx.recv() {
         match msg {
             Msg::Shutdown => break,
+            Msg::StopSession => {
+                // 会话运行中会在窗口间隙的 poll 里收到并自行退出；空闲时无事可做
+            }
             Msg::Start { path, pos } => run_session(&app, &ctx, &rx, &path, pos),
             Msg::Seek { pos } => {
                 let path = app.state::<AsrState>().current_path.lock().unwrap().clone();
@@ -150,6 +221,17 @@ fn worker(app: AppHandle, rx: Receiver<Msg>) {
             }
         }
     }
+}
+
+/// 会话生命周期包裹：存活标记供后台补全判断「实时是否还在处理」
+fn run_session(app: &AppHandle, ctx: &Arc<WhisperContext>, rx: &Receiver<Msg>, path: &str, start_pos: f64) {
+    app.state::<AsrState>()
+        .session_active
+        .store(true, Ordering::Relaxed);
+    run_session_inner(app, ctx, rx, path, start_pos);
+    app.state::<AsrState>()
+        .session_active
+        .store(false, Ordering::Relaxed);
 }
 
 fn find_model() -> Option<PathBuf> {
@@ -163,7 +245,7 @@ fn find_model() -> Option<PathBuf> {
 }
 
 // ---------- 会话：从 pos 起读 ffmpeg 管道，遇 seek/换片重启 ----------
-fn run_session(
+fn run_session_inner(
     app: &AppHandle,
     ctx: &WhisperContext,
     rx: &Receiver<Msg>,
@@ -172,6 +254,8 @@ fn run_session(
 ) {
     let mut current_path = path.to_string();
     let mut pos = start_pos;
+    // 字幕库：识别结果入库；覆盖表内的窗整窗跳过（seek 回看 / 重开视频直接命中）
+    let ts = crate::transcript::current(app);
 
     'session: loop {
         log::info!("[asr] 会话开始：{current_path} 自 {pos:.1}s");
@@ -207,6 +291,11 @@ fn run_session(
                     let _ = child.kill();
                     return;
                 }
+                Poll::StopSession => {
+                    let _ = child.kill();
+                    log::info!("[asr] 收到关片 → 会话结束");
+                    return;
+                }
                 Poll::Restart { pos: p, path: np } => {
                     let _ = child.kill();
                     log::info!("[asr] 识别中收到 seek/换片 → 重启会话 @{p:.1}s");
@@ -219,9 +308,9 @@ fn run_session(
                 Poll::None => {}
             }
 
-            // 整窗读满（EOF 提前退出）
-            match read_exact_or_eof(&mut stdout, &mut byte_buf) {
-                ReadOutcome::Full => {}
+            // 读一窗（EOF/区间尾返回实际样本数，尾巴不足一窗也识别）
+            let n = match read_exact_or_eof(&mut stdout, &mut byte_buf) {
+                ReadOutcome::Samples(n) => n,
                 ReadOutcome::Eof => {
                     log::info!("[asr] 音频读到结尾，会话结束（共 {window_idx} 窗）");
                     let _ = child.kill();
@@ -231,14 +320,23 @@ fn run_session(
                     let _ = child.kill();
                     return;
                 }
-            }
-            for (i, chunk) in byte_buf.chunks_exact(4).enumerate() {
+            };
+            for (i, chunk) in byte_buf[..n * 4].chunks_exact(4).enumerate() {
                 samples[i] = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
             }
 
             let window_start =
                 pos + (window_idx as f64) * (WINDOW_SAMPLES as f64 / SAMPLE_RATE as f64);
-            let window_end = window_start + WINDOW_SAMPLES as f64 / SAMPLE_RATE as f64;
+            let window_end = window_start + n as f64 / SAMPLE_RATE as f64;
+
+            // 已识别区间：字幕已在库里（打开视频时已载入上屏），不重复识别
+            if let Some(t) = &ts {
+                let covered = t.t.lock().unwrap().coverage(window_start, window_end) >= 1.0;
+                if covered {
+                    window_idx += 1;
+                    continue;
+                }
+            }
 
             // 追帧不追播：领先播放太多就等（等的同时持续轮询 seek）
             loop {
@@ -250,6 +348,11 @@ fn run_session(
                 match poll_rx(rx) {
                     Poll::Stop => {
                         let _ = child.kill();
+                        return;
+                    }
+                    Poll::StopSession => {
+                        let _ = child.kill();
+                        log::info!("[asr] 收到关片 → 会话结束");
                         return;
                     }
                     Poll::Restart { pos: p, path: np } => {
@@ -267,15 +370,20 @@ fn run_session(
             }
 
             // 能量 VAD：静音窗直接跳过（省 30–50% 算力的第一道闸）
+            let speech_ratio = energy_vad(&samples);
+            if speech_ratio < VAD_MIN_SPEECH_RATIO {
+                // 静音窗也标「已识别」——否则全片覆盖永远缺这一块，导出会重跑
+                mark_processed(&ts, window_start, window_end);
+                set_frontier(app, window_end);
+                window_idx += 1;
+                continue;
+            }
+            // 进度事件只对「确有人声、正在识别」的窗发——静音/对白间隙不发，
+            // 否则前端指示条在没台词的时候也常驻（体验问题：影响看画面）
             let _ = app.emit(
                 "asr://progress",
                 ProgressEvent { start: window_start, end: window_end },
             );
-            let speech_ratio = energy_vad(&samples);
-            if speech_ratio < VAD_MIN_SPEECH_RATIO {
-                window_idx += 1;
-                continue;
-            }
 
             // whisper 推理
             let t_infer = Instant::now();
@@ -287,7 +395,7 @@ fn run_session(
                     return;
                 }
             };
-            if let Err(e) = state.full(make_params(detected_lang.as_deref()), &samples) {
+            if let Err(e) = state.full(make_params(detected_lang.as_deref(), RT_THREADS), &samples[..n]) {
                 log::error!("[asr] 推理失败: {e}");
                 window_idx += 1;
                 continue;
@@ -298,6 +406,9 @@ fn run_session(
                     if let Some(code) = whisper_rs::get_lang_str(id) {
                         log::info!("[asr] 检测语言: {code}");
                         detected_lang = Some(code.to_string());
+                        if let Some(t) = &ts {
+                            t.t.lock().unwrap().lang = detected_lang.clone();
+                        }
                     }
                 }
             }
@@ -309,6 +420,7 @@ fn run_session(
 
             // 段落事件 + 幻觉治理
             let n_seg = state.full_n_segments().unwrap_or(0);
+            let mut raw_segs: Vec<(f64, f64, String)> = Vec::new();
             for i in 0..n_seg {
                 let text = state
                     .full_get_segment_text(i)
@@ -335,22 +447,56 @@ fn run_session(
                 let seg_end =
                     window_start + state.full_get_segment_t1(i).unwrap_or(0) as f64 / 100.0;
                 log::info!("[asr] 字幕 [{seg_start:.1}-{seg_end:.1}] {text}");
+                raw_segs.push((seg_start, seg_end, text));
+            }
+            // 入库去重（后台补全可能已识别过同一段），只把新增段上屏 + 进翻译队列
+            let new_segs = append_to_transcript(&ts, window_start, window_end, &raw_segs);
+            for s in &new_segs {
                 let _ = app.emit(
                     "asr://subtitle",
-                    SubtitleEvent { start: seg_start, end: seg_end, text: text.clone() },
+                    SubtitleEvent { start: s.start, end: s.end, text: s.text.clone() },
                 );
-                // 进翻译队列（M3：攒批 + 缓存 + llama-server）；已是中文的跳过
-                if !crate::mt::is_mostly_chinese(&text) {
-                    crate::mt::enqueue(app, seg_start, seg_end, &text);
+                if !crate::mt::is_mostly_chinese(&s.text) {
+                    crate::mt::enqueue(app, s.start, s.end, &s.text);
                 }
             }
+            set_frontier(app, window_end);
             window_idx += 1;
         }
     }
 }
 
-fn make_params<'a>(lang: Option<&'a str>) -> FullParams<'a, 'a> {
+/// 识别结果入库（覆盖标记 + 去重合并），返回新增段；无字幕库时原样返回
+fn append_to_transcript(
+    ts: &Option<Arc<TranscriptShared>>,
+    ws: f64,
+    we: f64,
+    raw: &[(f64, f64, String)],
+) -> Vec<Seg> {
+    let segs: Vec<Seg> = raw
+        .iter()
+        .map(|(s, e, x)| Seg { start: *s, end: *e, text: x.clone() })
+        .collect();
+    let Some(t) = ts else { return segs };
+    let mut t = t.t.lock().unwrap();
+    let added = t.append(&segs);
+    t.mark_window(ws, we);
+    t.maybe_flush();
+    added
+}
+
+/// 标记区间已过识别（VAD 静音窗等没有字幕段的情形）
+fn mark_processed(ts: &Option<Arc<TranscriptShared>>, ws: f64, we: f64) {
+    if let Some(t) = ts {
+        let mut t = t.t.lock().unwrap();
+        t.mark_window(ws, we);
+        t.maybe_flush();
+    }
+}
+
+fn make_params<'a>(lang: Option<&'a str>, n_threads: i32) -> FullParams<'a, 'a> {
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+    params.set_n_threads(n_threads);
     match lang {
         Some(l) => {
             params.set_language(Some(l));
@@ -380,6 +526,9 @@ fn poll_rx(rx: &Receiver<Msg>) -> Poll {
     loop {
         match rx.try_recv() {
             Ok(Msg::Shutdown) => return Poll::Stop,
+            Ok(Msg::StopSession) => {
+                result = Poll::StopSession;
+            }
             Ok(Msg::Seek { pos }) => {
                 result = Poll::Restart { pos, path: None };
             }
@@ -433,19 +582,20 @@ fn energy_vad(samples: &[f32]) -> f32 {
 }
 
 enum ReadOutcome {
-    Full,
+    /// 读到 n 个样本（可能不足整窗：文件尾/区间尾）
+    Samples(usize),
     Eof,
     Error,
 }
 
-/// 读满缓冲；EOF 返回 Eof（不足半窗按 EOF，够半窗按满窗处理）
+/// 读满一窗；不足整窗时返回实际样本数（>0 时仍值得跑一次识别，尾部台词不丢）
 fn read_exact_or_eof(r: &mut impl Read, byte_buf: &mut [u8]) -> ReadOutcome {
     let mut filled = 0usize;
     while filled < byte_buf.len() {
         match r.read(&mut byte_buf[filled..]) {
             Ok(0) => {
-                return if filled >= byte_buf.len() / 2 {
-                    ReadOutcome::Full
+                return if filled >= 4 {
+                    ReadOutcome::Samples(filled / 4)
                 } else {
                     ReadOutcome::Eof
                 };
@@ -454,7 +604,7 @@ fn read_exact_or_eof(r: &mut impl Read, byte_buf: &mut [u8]) -> ReadOutcome {
             Err(_) => return ReadOutcome::Error,
         }
     }
-    ReadOutcome::Full
+    ReadOutcome::Samples(byte_buf.len() / 4)
 }
 
 fn ffmpeg_path() -> &'static str {
@@ -480,21 +630,27 @@ pub fn cmd_check_ffmpeg() -> bool {
     ffmpeg_ok()
 }
 
-// ---------- 全片字幕导出（异步识别整个视频 → SRT） ----------
+// ---------- 全片补全：后台填洞 + 导出，共用一条识别通路 ----------
 //
-// 与实时识别管线完全独立：单独的 whisper 上下文 + ffmpeg 管道，从 0 顺序
-// 跑到片尾，不受播放 seek 影响。可识别中并行（CPU 足够，RTF 均 <0.3）。
+// 后台模式：打开视频后按字幕库空洞补识别，直到全片字幕就绪。
+//   - 实时会话优先：让出实时识别前沿 ±15s 的窗（正在看的区域实时管），CPU 降优先级
+//   - 换片（字幕库被替换）即退出；有空洞时等 30s 再补一轮
+// 导出模式：同一条通路跑全片（跳过已识别窗），有进度/可取消，跑完直接从字幕库
+// 构建 SRT——不再像旧实现那样单独加载第二份 whisper 模型。
 
-pub struct ExportState {
+pub struct CompletionState {
     running: AtomicBool,
     cancel: AtomicBool,
+    /// true = 导出模式（前端有进度条/取消按钮）；false = 后台补全（静默）
+    export: AtomicBool,
 }
 
-impl Default for ExportState {
+impl Default for CompletionState {
     fn default() -> Self {
         Self {
             running: AtomicBool::new(false),
             cancel: AtomicBool::new(false),
+            export: AtomicBool::new(false),
         }
     }
 }
@@ -511,24 +667,135 @@ struct ExportDone {
     srt: String,
 }
 
+fn srt_from_transcript(ts: &Arc<TranscriptShared>) -> String {
+    let t = ts.t.lock().unwrap();
+    build_srt(
+        &t.segments
+            .iter()
+            .map(|s| (s.start, s.end, s.text.clone()))
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// 后台补全：视频打开即启动，把字幕库从当前状态补到全片覆盖
+pub fn start_background_completion(app: &AppHandle, path: String, duration: f64) {
+    if duration <= 0.0 {
+        return;
+    }
+    let st = app.state::<CompletionState>();
+    if st.running.load(Ordering::SeqCst) {
+        return; // 已有补全在跑（可能是本视频的导出）
+    }
+    st.export.store(false, Ordering::SeqCst);
+    st.cancel.store(false, Ordering::SeqCst);
+    st.running.store(true, Ordering::SeqCst);
+    let app2 = app.clone();
+    let _ = std::thread::Builder::new()
+        .name("asr-complete".into())
+        .spawn(move || {
+            set_bg_priority();
+            loop {
+                match run_completion(&app2, &path.clone(), duration, false) {
+                    Ok(true) => {
+                        log::info!("[asr] 后台补全完成：全片字幕已就绪");
+                        let _ = app2.emit("asr://complete", &path);
+                        break;
+                    }
+                    Ok(false) => {
+                        // 有空洞（多半是实时会话正在处理的邻域）：等一会再补一轮
+                        if bg_should_stop(&app2, &path) {
+                            break;
+                        }
+                        for _ in 0..60 {
+                            if bg_should_stop(&app2, &path) {
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(500));
+                        }
+                        if bg_should_stop(&app2, &path) {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        // 「已取消」多半是换片/导出抢占，属正常收尾，不当失败刷日志
+                        if e != "已取消" {
+                            log::error!("[asr] 后台补全失败: {e}");
+                        }
+                        break;
+                    }
+                }
+            }
+            app2.state::<CompletionState>().running.store(false, Ordering::SeqCst);
+        });
+}
+
+fn bg_should_stop(app: &AppHandle, path: &str) -> bool {
+    app.state::<CompletionState>().cancel.load(Ordering::SeqCst)
+        || crate::transcript::current(app)
+            .map(|ts| ts.t.lock().unwrap().path != path)
+            .unwrap_or(true)
+}
+
+/// 后台补全降优先级（macOS QoS utility），不与播放/实时识别抢调度
+fn set_bg_priority() {
+    #[cfg(target_os = "macos")]
+    {
+        unsafe extern "C" {
+            fn pthread_set_qos_class_self_np(qos_class: u32, priority: i32) -> i32;
+        }
+        // QOS_CLASS_UTILITY
+        unsafe {
+            pthread_set_qos_class_self_np(0x09, 0);
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // 其他平台暂不降级（后续接 nice / Job Object 时统一处理）
+    }
+}
+
 #[tauri::command]
 pub fn cmd_export_full_srt(app: AppHandle, path: String, duration: f64) -> Result<(), String> {
-    let st = app.state::<ExportState>();
-    if st.running.swap(true, Ordering::SeqCst) {
-        return Err("已有导出任务进行中".into());
-    }
+    let st = app.state::<CompletionState>();
     if !PathBuf::from(&path).is_file() {
-        st.running.store(false, Ordering::SeqCst);
         return Err(format!("文件不存在: {path}"));
     }
+    // 后台补全在跑 → 让路（取消并等它退出）；导出已在跑 → 拒绝
+    if st.running.load(Ordering::SeqCst) {
+        if st.export.load(Ordering::SeqCst) {
+            return Err("已有导出任务进行中".into());
+        }
+        st.cancel.store(true, Ordering::SeqCst);
+        for _ in 0..100 {
+            if !st.running.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        if st.running.load(Ordering::SeqCst) {
+            return Err("后台补全正在收尾，请稍后再试".into());
+        }
+    }
     st.cancel.store(false, Ordering::SeqCst);
-    log::info!("[export] 全片字幕识别开始: {path}（时长 {duration:.0}s）");
+    st.export.store(true, Ordering::SeqCst);
+    st.running.store(true, Ordering::SeqCst);
+
+    // 字幕库已覆盖全片 → 不识别直接出 SRT（重看/补全完成后的视频秒出）
+    let ts = crate::transcript::open_current(&app, &path);
+    if ts.t.lock().unwrap().is_fully_covered(duration) {
+        let srt = srt_from_transcript(&ts);
+        st.running.store(false, Ordering::SeqCst);
+        log::info!("[export] 字幕库已覆盖全片，直接导出（跳过识别）");
+        let _ = app.emit("export://done", ExportDone { srt });
+        return Ok(());
+    }
+    log::info!("[export] 全片字幕补全开始: {path}（时长 {duration:.0}s）");
     let app2 = app.clone();
     std::thread::spawn(move || {
-        let r = run_export(&app2, &path, duration);
-        app2.state::<ExportState>().running.store(false, Ordering::SeqCst);
+        let r = run_completion(&app2, &path, duration, true);
+        app2.state::<CompletionState>().running.store(false, Ordering::SeqCst);
         match r {
-            Ok(()) => {}
+            Ok(_) => {} // done 事件已在 run_completion 内发出
             Err(e) if e == "已取消" => {
                 log::info!("[export] 全片识别已取消");
                 let _ = app2.emit("export://error", e);
@@ -544,65 +811,156 @@ pub fn cmd_export_full_srt(app: AppHandle, path: String, duration: f64) -> Resul
 
 #[tauri::command]
 pub fn cmd_cancel_export(app: AppHandle) -> Result<(), String> {
-    app.state::<ExportState>().cancel.store(true, Ordering::SeqCst);
+    app.state::<CompletionState>().cancel.store(true, Ordering::SeqCst);
     Ok(())
 }
 
-fn run_export(app: &AppHandle, path: &str, duration: f64) -> Result<(), String> {
-    let cancelled =
-        || app.state::<ExportState>().cancel.load(Ordering::SeqCst);
-
-    let Some(model_path) = find_model() else {
-        return Err("未找到 whisper 模型：请先在设置中下载识别模型".into());
+/// 跑一轮补全：按字幕库空洞逐段处理（空洞间用 ffmpeg -ss 跳转，不空读已识别区间）。
+/// 返回 Ok(true) = 全片已覆盖；Ok(false) = 还有空洞（后台模式稍后重跑）。
+/// 导出模式跑完直接发 export://done。
+fn run_completion(
+    app: &AppHandle,
+    path: &str,
+    duration: f64,
+    export_mode: bool,
+) -> Result<bool, String> {
+    let ctx = get_ctx()?;
+    let ts = crate::transcript::open_current(app, path);
+    let ranges: Vec<(f64, f64)> = if export_mode {
+        vec![(0.0, duration)]
+    } else {
+        ts.t.lock().unwrap().gaps(duration)
     };
-    let t0 = Instant::now();
-    let ctx = WhisperContext::new_with_params(
-        &model_path.to_string_lossy(),
-        WhisperContextParameters::default(),
-    )
-    .map_err(|e| format!("whisper 模型加载失败: {e}"))?;
-    log::info!("[export] 模型加载完成 {:.2}s", t0.elapsed().as_secs_f64());
+    if ranges.is_empty() {
+        ts.t.lock().unwrap().flush();
+        if export_mode {
+            let _ = app.emit("export://done", ExportDone { srt: srt_from_transcript(&ts) });
+        }
+        return Ok(true);
+    }
+    for (rs, re) in ranges {
+        process_range(app, &ctx, &ts, path, rs, re.min(duration), duration, export_mode)?;
+    }
+    ts.t.lock().unwrap().flush();
+    let complete = ts.t.lock().unwrap().gaps(duration).is_empty();
+    if export_mode {
+        let _ = app.emit("export://done", ExportDone { srt: srt_from_transcript(&ts) });
+    }
+    Ok(complete)
+}
 
-    let mut child = spawn_ffmpeg(path, 0.0)?;
+/// 处理一个连续区间 [start, end)：逐窗读音频 → 覆盖跳过 → VAD → whisper → 入库
+fn process_range(
+    app: &AppHandle,
+    ctx: &Arc<WhisperContext>,
+    ts: &Arc<TranscriptShared>,
+    path: &str,
+    start: f64,
+    end: f64,
+    duration: f64,
+    export_mode: bool,
+) -> Result<(), String> {
+    let threads = if export_mode { RT_THREADS } else { BG_THREADS };
+    let mode_label = if export_mode { "导出" } else { "后台" };
+    let mut child = spawn_ffmpeg(path, start)?;
     let Some(mut stdout) = child.stdout.take() else {
         let _ = child.kill();
         return Err("ffmpeg 管道建立失败".into());
     };
-
+    let cancelled = || {
+        app.state::<CompletionState>().cancel.load(Ordering::SeqCst)
+            || ts.cancel.load(Ordering::SeqCst)
+    };
     let mut byte_buf = vec![0u8; WINDOW_SAMPLES * 4];
     let mut samples = vec![0f32; WINDOW_SAMPLES];
-    let mut segs: Vec<(f64, f64, String)> = Vec::new();
-    let mut window_idx: u64 = 0;
-    // 顺序全片识别，无 seek 重叠，天然无重复段
+    let mut idx: u64 = 0;
+    // 已读到音频的位置：EOF 时把 [audio_end, end) 标记为已处理——
+    // 音频流可能短于容器时长（-shortest 拼接 / 封装 padding），
+    // 这段「没有音频」的区间不标记的话，补全永远差一口气
+    let mut audio_end = start;
     let mut last_text = String::new();
     let mut repeat_count = 0usize;
     let mut detected_lang: Option<String> =
         crate::settings::read("asr_language").filter(|l| !l.is_empty() && l != "auto");
+    let t0 = Instant::now();
+    log::info!("[asr] 补全区间 [{start:.1} – {end:.1}]s（{mode_label}）");
 
     loop {
         if cancelled() {
             let _ = child.kill();
             return Err("已取消".into());
         }
-        match read_exact_or_eof(&mut stdout, &mut byte_buf) {
-            ReadOutcome::Full => {}
+        let n = match read_exact_or_eof(&mut stdout, &mut byte_buf) {
+            ReadOutcome::Samples(n) => n,
             ReadOutcome::Eof => {
                 let _ = child.kill();
+                // 音频流结束：剩余区间按「已识别（无音频）」处理
+                if audio_end < end {
+                    let mut t = ts.t.lock().unwrap();
+                    t.mark_window(audio_end, end);
+                    t.maybe_flush();
+                }
                 break;
             }
             ReadOutcome::Error => {
                 let _ = child.kill();
                 return Err("ffmpeg 音频读取失败".into());
             }
-        }
-        for (i, chunk) in byte_buf.chunks_exact(4).enumerate() {
+        };
+        for (i, chunk) in byte_buf[..n * 4].chunks_exact(4).enumerate() {
             samples[i] = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         }
-        let window_start = (window_idx as f64) * (WINDOW_SAMPLES as f64 / SAMPLE_RATE as f64);
-        let window_end = window_start + WINDOW_SAMPLES as f64 / SAMPLE_RATE as f64;
+        let window_start = start + (idx as f64) * (WINDOW_SAMPLES as f64 / SAMPLE_RATE as f64);
+        let window_end = window_start + n as f64 / SAMPLE_RATE as f64;
+        audio_end = window_end;
+        // 本窗已触及区间尾：处理完这一窗就收工（ffmpeg 管道不用读完整个文件）
+        let range_done = window_end >= end;
 
-        if energy_vad(&samples) < VAD_MIN_SPEECH_RATIO {
-            window_idx += 1;
+        // 已识别窗跳过（实时会话可能刚补过这段）
+        if ts.t.lock().unwrap().coverage(window_start, window_end) >= 1.0 {
+            if range_done {
+                let _ = child.kill();
+                break;
+            }
+            idx += 1;
+            continue;
+        }
+        // 后台模式：实时识别前沿邻域让给实时会话（不标记，实时会话会标记）。
+        // 实时会话已结束（EOF/出错）就不再让路——否则会话留下的缝隙没人补。
+        if !export_mode
+            && app
+                .state::<AsrState>()
+                .session_active
+                .load(Ordering::Relaxed)
+        {
+            let frontier =
+                app.state::<AsrState>().frontier_ms.load(Ordering::Relaxed) as f64 / 1000.0;
+            if (window_start - frontier).abs() <= FRONTIER_CLEARANCE_SEC {
+                if range_done {
+                    let _ = child.kill();
+                    break;
+                }
+                idx += 1;
+                continue;
+            }
+        }
+        if export_mode && duration > 0.0 {
+            let percent = (window_end / duration * 100.0).min(99.0);
+            let _ = app.emit("export://progress", ExportProgress { percent });
+        }
+
+        let speech_ratio = energy_vad(&samples[..n]);
+        if speech_ratio < VAD_MIN_SPEECH_RATIO {
+            {
+                let mut t = ts.t.lock().unwrap();
+                t.mark_window(window_start, window_end);
+                t.maybe_flush();
+            }
+            if range_done {
+                let _ = child.kill();
+                break;
+            }
+            idx += 1;
             continue;
         }
 
@@ -614,19 +972,25 @@ fn run_export(app: &AppHandle, path: &str, duration: f64) -> Result<(), String> 
                 return Err(format!("create_state 失败: {e}"));
             }
         };
-        if state.full(make_params(detected_lang.as_deref()), &samples).is_err() {
-            window_idx += 1;
+        if state.full(make_params(detected_lang.as_deref(), threads), &samples[..n]).is_err() {
+            if range_done {
+                let _ = child.kill();
+                break;
+            }
+            idx += 1;
             continue;
         }
         if detected_lang.is_none() {
             if let Ok(id) = state.full_lang_id_from_state() {
                 if let Some(code) = whisper_rs::get_lang_str(id) {
-                    log::info!("[export] 检测语言: {code}");
+                    log::info!("[asr] 补全检测语言: {code}");
                     detected_lang = Some(code.to_string());
+                    ts.t.lock().unwrap().lang = detected_lang.clone();
                 }
             }
         }
         let n_seg = state.full_n_segments().unwrap_or(0);
+        let mut raw_segs: Vec<(f64, f64, String)> = Vec::new();
         for i in 0..n_seg {
             let text = state
                 .full_get_segment_text(i)
@@ -649,29 +1013,46 @@ fn run_export(app: &AppHandle, path: &str, duration: f64) -> Result<(), String> 
             let seg_start =
                 window_start + state.full_get_segment_t0(i).unwrap_or(0) as f64 / 100.0;
             let seg_end = window_start + state.full_get_segment_t1(i).unwrap_or(0) as f64 / 100.0;
-            segs.push((seg_start, seg_end, text));
+            raw_segs.push((seg_start, seg_end, text));
         }
-        window_idx += 1;
-        if duration > 0.0 {
-            let percent = (window_end / duration * 100.0).min(99.0);
-            let _ = app.emit("export://progress", ExportProgress { percent });
+        // 入库；后台模式把新增段上屏（用户可能正好看到这块），导出模式不上屏
+        {
+            let mut t = ts.t.lock().unwrap();
+            let added = t.append(
+                &raw_segs
+                    .iter()
+                    .map(|(s, e, x)| Seg { start: *s, end: *e, text: x.clone() })
+                    .collect::<Vec<_>>(),
+            );
+            t.mark_window(window_start, window_end);
+            t.maybe_flush();
+            if !export_mode {
+                for s in &added {
+                    log::info!("[asr] 补全字幕 [{:.1}-{:.1}] {}", s.start, s.end, s.text);
+                    let _ = app.emit(
+                        "asr://subtitle",
+                        SubtitleEvent { start: s.start, end: s.end, text: s.text.clone() },
+                    );
+                    if !crate::mt::is_mostly_chinese(&s.text) {
+                        crate::mt::enqueue(app, s.start, s.end, &s.text);
+                    }
+                }
+            }
         }
         log::debug!(
-            "[export] 窗 {window_idx} [{window_start:.1}-{window_end:.1}] 推理 {:.2}s",
+            "[asr] 补全窗 {idx} [{window_start:.1}-{window_end:.1}] 推理 {:.2}s（{mode_label}）",
             t_infer.elapsed().as_secs_f64()
         );
+        idx += 1;
+        if range_done {
+            let _ = child.kill();
+            break;
+        }
     }
-
-    if segs.is_empty() {
-        return Err("没有识别到任何语音内容".into());
-    }
-    let srt = build_srt(&segs);
     log::info!(
-        "[export] 全片识别完成：{} 条字幕，SRT {}KB",
-        segs.len(),
-        srt.len() / 1024
+        "[asr] 补全区间 [{start:.1} – {end:.1}]s 完成，耗时 {:.1}s（{mode_label}）",
+        t0.elapsed().as_secs_f64()
     );
-    let _ = app.emit("export://done", ExportDone { srt });
     Ok(())
 }
 

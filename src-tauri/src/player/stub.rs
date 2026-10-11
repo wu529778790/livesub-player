@@ -34,6 +34,11 @@ pub fn cmd_player_seek(_target: f64, _absolute: bool) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn cmd_player_stop() -> Result<(), String> {
+    Err(UNSUPPORTED.into())
+}
+
+#[tauri::command]
 pub fn cmd_player_set_volume(_volume: f64) -> Result<(), String> {
     Err(UNSUPPORTED.into())
 }

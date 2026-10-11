@@ -3,7 +3,8 @@
 //! 数据目录统一走 `data_dir()`：首次调用时把旧版 `~/.dualsub` 整体迁移为
 //! `~/.livesub-player`（模型/设置/翻译缓存一次搬完，避免重复下载）。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::Value;
 
@@ -41,7 +42,26 @@ pub fn write(key: &str, value: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    std::fs::write(&path, serde_json::to_string(&v).unwrap()).map_err(|e| e.to_string())
+    write_atomic(&path, serde_json::to_string(&v).unwrap().as_bytes())
+}
+
+/// 原子写盘：先写同目录临时文件再 rename。直写一半崩溃会损坏 JSON（设置/缓存/字幕库共用）。
+/// 并发写同一目标时 rename 可能撞车，此时目标已是完整文件，按成功处理。
+pub fn write_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
+    static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_extension(format!("tmp{n}"));
+    std::fs::write(&tmp, data).map_err(|e| e.to_string())?;
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            if path.exists() && !tmp.exists() {
+                Ok(())
+            } else {
+                Err(e.to_string())
+            }
+        }
+    }
 }
 
 // ---------- Tauri 命令 ----------

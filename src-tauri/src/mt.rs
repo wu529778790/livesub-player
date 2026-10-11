@@ -1,9 +1,13 @@
 //! M3 翻译管线（技术方案 §4.2）
 //!
 //! - llama-server sidecar 常驻（OpenAI 兼容 /v1/chat/completions），懒启动、健康检查、退出收割
-//! - 攒批翻译：4 句一批（方案：3–5 句带上下文，译文连贯且省 token），2s 超时触发
+//! - 攒批翻译：4 句一批（方案：3–5 句带上下文，译文连贯且省 token），2s 超时触发；
+//!   就近优先——离播放位置最近的先译，seek 后译文跟上的永远是正在看的部分
 //! - 翻译缓存：(源文本, 源语言, 目标语言) 键——M3 固定 zh 目标，键取源文本；内存 + 磁盘 JSON
+//!   （原子写 + 节流落盘，不再每批全量重写）
 //! - 降级：模型/binary 缺失时标记不可用，播放照常（「看剧永不停」原则），前端隐藏译文行
+//! - 字幕库联动：打开视频时把库里未译的句全部入队（缓存命中直接回放），全片补全
+//!   灌进来的句子会一直译到完
 
 use std::collections::HashMap;
 use std::net::TcpListener;
@@ -11,7 +15,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
@@ -20,6 +24,12 @@ use tauri::{AppHandle, Emitter, Manager};
 const BATCH_LINES: usize = 4;
 /// 攒批超时：首句入队后等这么久没凑满就翻译
 const BATCH_TIMEOUT_MS: u64 = 2000;
+/// 等待池上限（全片补全会一次性灌入整部电影的句数）
+const POOL_CAP: usize = 10000;
+/// 单句引擎失败最大重试次数（重开视频会重新入队再试）
+const MAX_ATTEMPTS: u32 = 3;
+/// 翻译缓存落盘节流
+const CACHE_SAVE_INTERVAL_MS: u128 = 5000;
 const BASE_PORT: u16 = 18434;
 const ONLINE_TIMEOUT_SECS: u64 = 10;
 
@@ -107,6 +117,8 @@ pub struct MtState {
     cache: Mutex<HashMap<String, String>>,
     /// 翻译服务可用性（false 后前端隐藏译文行）
     pub unavailable: AtomicBool,
+    /// 收割中（⌘Q/信号退出）：在途请求被杀出的失败不再记 ERROR/发事件
+    shutting_down: AtomicBool,
 }
 
 impl Default for MtState {
@@ -116,6 +128,7 @@ impl Default for MtState {
             child: Mutex::new(None),
             cache: Mutex::new(HashMap::new()),
             unavailable: AtomicBool::new(false),
+            shutting_down: AtomicBool::new(false),
         }
     }
 }
@@ -125,6 +138,7 @@ struct TransJob {
     start: f64,
     end: f64,
     text: String,
+    attempts: u32,
 }
 
 #[derive(Clone, Serialize)]
@@ -137,10 +151,8 @@ struct TranslationEvent {
 }
 
 // ---------- 对 asr 的接口 ----------
-pub fn enqueue(app: &AppHandle, start: f64, end: f64, text: &str) {
-    if app.state::<MtState>().unavailable.load(Ordering::Relaxed) {
-        return;
-    }
+/// 懒启动 worker 并拿到发送端
+fn worker_tx(app: &AppHandle) -> Sender<TransJob> {
     let st = app.state::<MtState>();
     let mut tx_slot = st.tx.lock().unwrap();
     if tx_slot.is_none() {
@@ -149,22 +161,66 @@ pub fn enqueue(app: &AppHandle, start: f64, end: f64, text: &str) {
         std::thread::spawn(move || worker(app2, rx));
         *tx_slot = Some(tx);
     }
-    let _ = tx_slot.as_ref().unwrap().send(TransJob {
+    tx_slot.as_ref().unwrap().clone()
+}
+
+pub fn enqueue(app: &AppHandle, start: f64, end: f64, text: &str) {
+    if app.state::<MtState>().unavailable.load(Ordering::Relaxed) {
+        return;
+    }
+    let _ = worker_tx(app).send(TransJob {
         start,
         end,
         text: text.to_string(),
+        attempts: 0,
     });
 }
 
-/// 主进程退出时收割 llama-server（方案 §4.4：退出即干净）
+/// 字幕库载入后：把库里所有非中文句交给翻译管线。缓存命中的直接回放上屏，
+/// 未命中的排队翻译——配合全片补全，译文会一直补到全片完成。
+pub fn enqueue_transcript(app: &AppHandle) {
+    if app.state::<MtState>().unavailable.load(Ordering::Relaxed) {
+        return;
+    }
+    let Some(ts) = crate::transcript::current(app) else {
+        return;
+    };
+    let segs = ts.t.lock().unwrap().segments.clone();
+    if segs.is_empty() {
+        return;
+    }
+    let tx = worker_tx(app);
+    let mut n = 0usize;
+    for seg in segs {
+        if is_mostly_chinese(&seg.text) {
+            continue;
+        }
+        let _ = tx.send(TransJob {
+            start: seg.start,
+            end: seg.end,
+            text: seg.text,
+            attempts: 0,
+        });
+        n += 1;
+    }
+    if n > 0 {
+        log::info!("[mt] 字幕库 {n} 句入翻译队列（缓存命中直接回放）");
+    }
+}
+
+/// 主进程退出时收割 llama-server（方案 §4.4：退出即干净）+ 缓存兜底落盘
 pub fn shutdown(app: &AppHandle) {
     let st = app.state::<MtState>();
-    let mut guard = st.child.lock().unwrap();
-    if let Some(mut child) = guard.take() {
-        log::info!("[mt] 收割 llama-server (pid {:?})", child.id());
-        let _ = child.kill();
-        let _ = child.wait();
+    st.shutting_down.store(true, Ordering::Relaxed);
+    {
+        let mut guard = st.child.lock().unwrap();
+        if let Some(mut child) = guard.take() {
+            log::info!("[mt] 收割 llama-server (pid {:?})", child.id());
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
+    save_cache(&st.cache.lock().unwrap(), &cache_file());
 }
 
 // ---------- 引擎设置命令 ----------
@@ -184,6 +240,8 @@ pub fn cmd_mt_set_engine(app: AppHandle, engine: String) -> Result<(), String> {
 pub fn reset_unavailable(app: &AppHandle) {
     app.state::<MtState>().unavailable.store(false, Ordering::Relaxed);
     let _ = app.emit("mt://available", ());
+    // 引擎恢复/装好：字幕库里还没译的句子继续补齐
+    enqueue_transcript(app);
 }
 
 #[tauri::command]
@@ -195,36 +253,53 @@ pub fn cmd_mt_get_engine() -> String {
     }
 }
 
-// ---------- worker：攒批翻译 ----------
+// ---------- worker：攒批 + 就近优先 ----------
+struct Worker {
+    pool: Vec<TransJob>,
+    last_save: Instant,
+    cache_path: PathBuf,
+}
+
 fn worker(app: AppHandle, rx: Receiver<TransJob>) {
     // 启动时加载磁盘缓存
     let cache_path = cache_file();
     {
         let st = app.state::<MtState>();
         if let Ok(bytes) = std::fs::read(&cache_path) {
-            if let Ok(map) = serde_json::from_slice::<HashMap<String, String>>(&bytes) {
-                log::info!("[mt] 磁盘缓存载入 {} 条", map.len());
-                *st.cache.lock().unwrap() = map;
+            // 注意与 save_cache 的 CacheFile{version, entries} 结构一致——
+            // 旧代码按裸 HashMap 解析，永远失败，跨启动缓存形同虚设
+            if let Ok(file) = serde_json::from_slice::<CacheFile>(&bytes) {
+                log::info!("[mt] 磁盘缓存载入 {} 条", file.entries.len());
+                *st.cache.lock().unwrap() = file.entries;
             }
         }
     }
 
-    let mut batch: Vec<TransJob> = Vec::new();
+    let mut w = Worker {
+        pool: Vec::new(),
+        // 刻意设为「已过期」：首条译文落盘不等 5s 节流——单句短视频被杀时也不丢缓存
+        last_save: Instant::now() - Duration::from_millis(CACHE_SAVE_INTERVAL_MS as u64 + 1000),
+        cache_path,
+    };
     loop {
-        // 攒批：BATCH_LINES 句或 BATCH_TIMEOUT_MS 触发
-        if batch.len() >= BATCH_LINES {
-            flush(&app, &mut batch, &cache_path);
+        // 凑满一批立即翻译；没凑满则等攒批超时
+        if w.pool.len() >= BATCH_LINES {
+            w.flush(&app);
             continue;
         }
-        match rx.recv_timeout(Duration::from_millis(if batch.is_empty() {
-            u64::MAX / 2 // 队列空：长等
+        match rx.recv_timeout(Duration::from_millis(if w.pool.is_empty() {
+            u64::MAX / 2 // 池空：长等
         } else {
             BATCH_TIMEOUT_MS
         })) {
-            Ok(job) => batch.push(job),
+            Ok(job) => {
+                if w.pool.len() < POOL_CAP {
+                    w.pool.push(job);
+                }
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                if !batch.is_empty() {
-                    flush(&app, &mut batch, &cache_path);
+                if !w.pool.is_empty() {
+                    w.flush(&app);
                 }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -232,89 +307,137 @@ fn worker(app: AppHandle, rx: Receiver<TransJob>) {
     }
 }
 
-fn flush(app: &AppHandle, batch: &mut Vec<TransJob>, cache_path: &PathBuf) {
-    if batch.is_empty() {
-        return;
-    }
-    let st = app.state::<MtState>();
-
-    // 1. 缓存命中直接出
-    let mut uncached: Vec<(usize, &TransJob)> = Vec::new();
-    {
-        let cache = st.cache.lock().unwrap();
-        for (i, job) in batch.iter().enumerate() {
-            if let Some(dst) = cache.get(&job.text) {
-                emit_translation(app, job, dst);
-            } else {
-                uncached.push((i, job));
-            }
+impl Worker {
+    /// 就近优先：离播放位置最近的先译——seek 之后译文跟上的永远是正在看的部分
+    fn flush(&mut self, app: &AppHandle) {
+        if app.state::<MtState>().shutting_down.load(Ordering::Relaxed) {
+            // 收割中：排空待翻队列即可，不再发请求
+            self.pool.clear();
+            return;
         }
-    }
-    if uncached.is_empty() {
-        batch.clear();
-        return;
-    }
+        let st = app.state::<MtState>();
+        let play = crate::asr::playback_pos(app);
+        self.pool
+            .sort_by(|a, b| (a.start - play).abs().total_cmp(&(b.start - play).abs()));
+        let take = self.pool.len().min(BATCH_LINES);
+        let batch: Vec<TransJob> = self.pool.drain(..take).collect();
 
-    let lines: Vec<&str> = uncached.iter().map(|(_, j)| j.text.as_str()).collect();
-
-    // 2. 按引擎路由（产品决策：自动=在线优先→本地兜底；失败时提示下载本地模型）
-    let engine = engine_setting();
-    log::info!(
-        "[mt] 引擎={}，批 {} 句",
-        match engine {
-            Engine::Auto => "auto",
-            Engine::OnlineOnly => "online",
-            Engine::LocalOnly => "local",
-        },
-        lines.len()
-    );
-    let result = match engine {
-        Engine::OnlineOnly => online_translate(&lines).map_err(|e| {
-            log::error!("[mt] 在线翻译失败: {e}");
-            let _ = app.emit("mt://need-local-model", "在线翻译不可用");
-            e
-        }),
-        Engine::LocalOnly => local_translate(app, &lines).map_err(|e| {
-                log::error!("[mt] 本地翻译失败: {e}");
-            app.state::<MtState>()
-                .unavailable
-                .store(true, Ordering::Relaxed);
-            let _ = app.emit("mt://unavailable", e.clone());
-            e
-        }),
-        Engine::Auto => match online_translate(&lines) {
-            Ok(o) => Ok(o),
-            Err(e) => {
-                log::warn!("[mt] 在线翻译失败（{e}），尝试本地兜底");
-                match local_translate(app, &lines) {
-                    Ok(o) => Ok(o),
-                    Err(e2) => {
-                        log::error!("[mt] 本地兜底失败: {e2}");
-                        let _ = app.emit(
-                            "mt://need-local-model",
-                            "在线翻译不可用，可下载本地模型兜底",
-                        );
-                        Err(e2)
-                    }
+        // 1. 缓存命中直接出
+        let mut uncached: Vec<TransJob> = Vec::new();
+        {
+            let cache = st.cache.lock().unwrap();
+            for job in batch {
+                match cache.get(&job.text) {
+                    Some(dst) => emit_translation(app, &job, dst),
+                    None => uncached.push(job),
                 }
             }
-        },
-    };
+        }
+        if uncached.is_empty() {
+            return;
+        }
 
-    // 3. 结果入库 + 上屏
-    if let Ok(outs) = result {
-        if outs.len() == lines.len() {
-            let mut cache = st.cache.lock().unwrap();
-            for ((_, job), dst) in uncached.into_iter().zip(outs.into_iter()) {
-                let dst = dst.trim().to_string();
-                cache.insert(job.text.clone(), dst.clone());
-                emit_translation(app, job, &dst);
+        let lines: Vec<&str> = uncached.iter().map(|j| j.text.as_str()).collect();
+
+        // 2. 按引擎路由（产品决策：自动=在线优先→本地兜底；失败时提示下载本地模型）
+        let engine = engine_setting();
+        log::info!(
+            "[mt] 引擎={}，批 {} 句（池 {}）",
+            match engine {
+                Engine::Auto => "auto",
+                Engine::OnlineOnly => "online",
+                Engine::LocalOnly => "local",
+            },
+            lines.len(),
+            self.pool.len()
+        );
+        // 收割中的失败 = 在途请求被杀，静默处理（不刷 ERROR、不发引导事件）
+        let shutting_down = || app.state::<MtState>().shutting_down.load(Ordering::Relaxed);
+        let result = match engine {
+            Engine::OnlineOnly => online_translate(&lines).map_err(|e| {
+                if !shutting_down() {
+                    log::error!("[mt] 在线翻译失败: {e}");
+                    let _ = app.emit("mt://need-local-model", "在线翻译不可用");
+                }
+                e
+            }),
+            Engine::LocalOnly => local_translate(app, &lines).map_err(|e| {
+                if !shutting_down() {
+                    log::error!("[mt] 本地翻译失败: {e}");
+                    app.state::<MtState>()
+                        .unavailable
+                        .store(true, Ordering::Relaxed);
+                    let _ = app.emit("mt://unavailable", e.clone());
+                }
+                e
+            }),
+            Engine::Auto => match online_translate(&lines) {
+                Ok(o) => Ok(o),
+                Err(e) => {
+                    if !shutting_down() {
+                        log::warn!("[mt] 在线翻译失败（{e}），尝试本地兜底");
+                    }
+                    match local_translate(app, &lines) {
+                        Ok(o) => Ok(o),
+                        Err(e2) => {
+                            if !shutting_down() {
+                                log::error!("[mt] 本地兜底失败: {e2}");
+                                let _ = app.emit(
+                                    "mt://need-local-model",
+                                    "在线翻译不可用，可下载本地模型兜底",
+                                );
+                            }
+                            Err(e2)
+                        }
+                    }
+                }
+            },
+        };
+
+        // 3. 成功：入库 + 上屏 + 节流落盘；失败：重新入池（退避重试）
+        match result {
+            Ok(outs) if outs.len() == lines.len() => {
+                {
+                    let mut cache = st.cache.lock().unwrap();
+                    for (job, dst) in uncached.into_iter().zip(outs.into_iter()) {
+                        let dst = dst.trim().to_string();
+                        if !dst.is_empty() {
+                            cache.insert(job.text.clone(), dst.clone());
+                        }
+                        emit_translation(app, &job, &dst);
+                    }
+                }
+                if self.last_save.elapsed().as_millis() > CACHE_SAVE_INTERVAL_MS {
+                    save_cache(&st.cache.lock().unwrap(), &self.cache_path);
+                    self.last_save = Instant::now();
+                }
+            }
+            Ok(_) | Err(_) => {
+                if !shutting_down() {
+                    self.requeue(uncached);
+                }
             }
         }
     }
 
-    batch.clear();
-    save_cache(&st.cache.lock().unwrap(), cache_path);
+    /// 失败重试：重新入池（带次数上限），并退避一拍——别把故障的引擎往死里打
+    fn requeue(&mut self, jobs: Vec<TransJob>) {
+        let mut dropped = 0usize;
+        for mut job in jobs {
+            job.attempts += 1;
+            if job.attempts <= MAX_ATTEMPTS {
+                self.pool.push(job);
+            } else {
+                dropped += 1;
+            }
+        }
+        if dropped > 0 {
+            log::warn!(
+                "[mt] {dropped} 句重试 {MAX_ATTEMPTS} 次仍失败，本轮放弃（重开视频会再试）"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(BATCH_TIMEOUT_MS));
+    }
 }
 
 /// 本地 sidecar 翻译（llama-server）
@@ -546,6 +669,6 @@ fn save_cache(map: &HashMap<String, String>, path: &PathBuf) {
         entries: map.clone(),
     };
     if let Ok(s) = serde_json::to_string(&data) {
-        let _ = std::fs::write(path, s);
+        let _ = crate::settings::write_atomic(path, s.as_bytes());
     }
 }

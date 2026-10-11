@@ -161,6 +161,7 @@ const MPV_EVENT_END_FILE: c_int = 7;
 const MPV_EVENT_FILE_LOADED: c_int = 8;
 const MPV_EVENT_SEEK: c_int = 20;
 const MPV_EVENT_PROPERTY_CHANGE: c_int = 22;
+const MPV_END_FILE_REASON_EOF: i64 = 0;
 const MPV_END_FILE_REASON_ERROR: i64 = 4;
 
 // ---------- 全局状态 ----------
@@ -346,6 +347,14 @@ pub struct PlayerEvent {
     paused: Option<bool>,
 }
 
+/// 实际加载成功的文件：后端发起的加载（自动化钩子、未来的 CLI/打开方式）
+/// 前端无从得知路径，统一走这个事件对齐状态
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlayerLoaded {
+    path: String,
+}
+
 fn mpv_err(code: i32, what: &str) -> String {
     format!("{what} 失败: mpv_error {code}")
 }
@@ -446,7 +455,16 @@ fn ensure_mpv(window: &tauri::WebviewWindow) -> Result<*mut c_void, String> {
             let _ = mpv_set_option_string(ctx, c"hwdec".as_ptr(), c"no".as_ptr());
         } else {
             mpv_set_option_string(ctx, c"vo".as_ptr(), c"libmpv".as_ptr());
-            mpv_set_option_string(ctx, c"hwdec".as_ptr(), c"no".as_ptr());
+            // 硬解：auto-copy = VideoToolbox 解码后拷回内存（与 SW 渲染路径兼容），
+            // 解码 CPU 大幅下降；编解码不受支持时 mpv 自动落回软解。
+            // LIVESUB_HWDEC=no 可回退纯软解排查问题。
+            let hwdec = std::env::var("LIVESUB_HWDEC")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "auto-copy".into());
+            log::info!("[player] hwdec={hwdec}");
+            let c_hwdec = CString::new(hwdec).unwrap();
+            mpv_set_option_string(ctx, c"hwdec".as_ptr(), c_hwdec.as_ptr());
             // render context 必须在 mpv_initialize 之前创建
             let api = c"sw";
             let mut params = [
@@ -536,6 +554,12 @@ unsafe fn event_loop(app: AppHandle, client: MpvPtr) {
                         prefix.to_string_lossy(),
                         text.trim_end()
                     );
+                    // mpv 在 macOS 的已知噪音：CoreAudio 拒设 channel layout 但 AO 随后
+                    // 正常初始化（每次加载必报一次 error）——降为 debug 免得排障时刷屏
+                    if text.contains("unable to set the input channel layout") {
+                        log::debug!("{line}");
+                        continue;
+                    }
                     match mpv_level.as_str() {
                         "fatal" | "error" => log::error!("{line}"),
                         "warn" => log::warn!("{line}"),
@@ -582,24 +606,32 @@ unsafe fn event_loop(app: AppHandle, client: MpvPtr) {
                     crate::asr::on_seek(&app, t);
                 }
                 MPV_EVENT_END_FILE => {
-                    // 播放失败（解码失败/文件损坏）只在 END_FILE reason=error 里上报——
-                    // loadfile 命令本身几乎总是成功，坏文件是异步失败的
                     let d = (*ev).data as *mut mpv_event_end_file;
-                    if d.is_null() || (*d).reason != MPV_END_FILE_REASON_ERROR {
+                    if d.is_null() {
                         continue;
                     }
-                    let reason = if (*d).error < 0 {
-                        CStr::from_ptr(mpv_error_string((*d).error)).to_string_lossy().into_owned()
-                    } else {
-                        String::new()
-                    };
-                    let msg = if reason.is_empty() {
-                        "该视频无法播放（格式不受支持或文件损坏），请换一个文件试试".to_string()
-                    } else {
-                        format!("该视频无法播放（{reason}），请换一个文件试试")
-                    };
-                    log::error!("[player] {msg}");
-                    let _ = app.emit("player://error", msg);
+                    if (*d).reason == MPV_END_FILE_REASON_ERROR {
+                        // 播放失败（解码失败/文件损坏）只在 END_FILE reason=error 里上报——
+                        // loadfile 命令本身几乎总是成功，坏文件是异步失败的
+                        let reason = if (*d).error < 0 {
+                            CStr::from_ptr(mpv_error_string((*d).error)).to_string_lossy().into_owned()
+                        } else {
+                            String::new()
+                        };
+                        let msg = if reason.is_empty() {
+                            "该视频无法播放（格式不受支持或文件损坏），请换一个文件试试".to_string()
+                        } else {
+                            format!("该视频无法播放（{reason}），请换一个文件试试")
+                        };
+                        log::error!("[player] {msg}");
+                        let _ = app.emit("player://error", msg);
+                        continue;
+                    }
+                    if (*d).reason == MPV_END_FILE_REASON_EOF {
+                        // 自然播完（loadfile replace / 手动 stop 是 stop/quit，不触发）——
+                        // 前端播放列表靠它自动连播
+                        let _ = app.emit("player://ended", ());
+                    }
                 }
                 _ => {}
             }
@@ -691,8 +723,12 @@ pub fn player_load(app: &AppHandle, path: String) -> Result<(), String> {
         let result = load_on_main(app, &path, subs);
         let _ = tx.send(result.clone());
         if result.is_ok() {
+            // 通知前端实际加载的文件（后端发起的加载前端感知不到路径）
+            let _ = app.emit("player://loaded", PlayerLoaded { path: path.clone() });
             // 实时识别管线启动（模型缺失时只发事件，不影响播放）
             crate::asr::on_video_start(app, path);
+            // 菜单里的「打开最近使用」要带上这部片
+            crate::menu::refresh(app);
         }
     })
     .map_err(|e| e.to_string())?;
@@ -771,6 +807,15 @@ pub fn player_seek(app: &AppHandle, target: f64, absolute: bool) -> Result<(), S
     }
 }
 
+/// 停止播放回到空闲（关片）：mpv stop + 识别会话收尾 + 最近使用刷新
+pub fn player_stop(app: &AppHandle) -> Result<(), String> {
+    let ctx = current_mpv(app)?;
+    unsafe { cmd(ctx, &[c"stop"])? };
+    crate::asr::on_stop(app);
+    crate::menu::refresh(app);
+    Ok(())
+}
+
 pub fn player_set_volume(app: &AppHandle, volume: f64) -> Result<(), String> {
     let ctx = current_mpv(app)?;
     unsafe { set_f64(ctx, c"volume", volume.clamp(0.0, 100.0)) }
@@ -840,6 +885,11 @@ pub fn cmd_player_toggle_pause(app: AppHandle) -> Result<bool, String> {
 #[tauri::command]
 pub fn cmd_player_seek(app: AppHandle, target: f64, absolute: bool) -> Result<(), String> {
     player_seek(&app, target, absolute)
+}
+
+#[tauri::command]
+pub fn cmd_player_stop(app: AppHandle) -> Result<(), String> {
+    player_stop(&app)
 }
 
 #[tauri::command]
