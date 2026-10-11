@@ -19,7 +19,7 @@ cask "livesub-player" do
   # 注意：本仓库的 Release 清理策略只保留最近 3 个版本——cask 若指向被清理的
   # tag 会 404。发新版后请立即同步更新此文件并自建 tap 发布。
   version "1.0.0"
-  sha256 "51de2c4117048f403b2a2ee3d1d87739c9efeced76082cdbec6fd8c8fd48009d"
+  sha256 "50a9644dbef55ba7424367c62d1b44e93a57319e6323aa16fc9534061c02ced0"
 
   url "https://github.com/wu529778790/livesub-player/releases/download/v#{version}/LiveSub-Player-macOS.zip"
   name "LiveSub-Player"
