@@ -23,6 +23,36 @@ use tauri::{AppHandle, Manager};
 
 const FLUSH_INTERVAL_MS: u128 = 3000;
 
+/// whisper 对纯音乐/音效段常输出「(音楽)」「[Music]」「(baby crying)」这类
+/// 舞台指示标记——零信息量（观众自己听得到），还白占翻译队列。
+/// 判定规则：剥掉括号/引号/空白/语气符号后整段恰等于已知声音词 → 丢弃。
+/// 只做整段等值匹配，不误伤「音楽が好き」这类真实台词。
+pub fn is_sound_marker(text: &str) -> bool {
+    let cleaned: String = text
+        .chars()
+        .filter(|c| {
+            !matches!(
+                c,
+                '（' | '）' | '(' | ')' | '「' | '」' | '『' | '』' | '[' | ']' | '【' | '】' | ' '
+                    | '\u{3000}' | '.' | '。' | '、' | ',' | '~' | '～' | '♪' | '♫' | '-' | '·'
+            )
+        })
+        .collect::<String>()
+        .to_lowercase();
+    if cleaned.is_empty() {
+        return true; // 全是符号（如「♪~」）
+    }
+    const MARKERS: [&str; 40] = [
+        "音楽", "音乐", "music", "instrumental", "bgm",
+        "拍手", "掌声", "applause", "clapping",
+        "笑", "笑い", "笑声", "laughter", "laugh", "laughs",
+        "泣き声", "哭声", "crying", "sobbing", "whimpering", "weeping", "babycrying", "babycooing",
+        "cooing", "sigh", "sighs", "sighing", "叹气", "叹息", "咳嗽", "cough", "coughing",
+        "inaudible", "silence", "静寂", "无音", "無音", "静音", "kissing", "kiss",
+    ];
+    MARKERS.iter().any(|m| cleaned == *m)
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Seg {
     pub start: f64,
@@ -95,13 +125,24 @@ impl Transcript {
             if let Ok(f) = serde_json::from_slice::<TranscriptFile>(&bytes) {
                 if f.path == path {
                     log::info!("[transcript] 字幕库命中：{}（{} 段）", path, f.segments.len());
+                    // 旧库存里的声音标记段（whisper 的 (音楽)/[Music] 类输出）惰性清洗
+                    let mut segments = f.segments;
+                    let before = segments.len();
+                    segments.retain(|s| !is_sound_marker(&s.text));
+                    let purged = before != segments.len();
+                    if purged {
+                        log::info!(
+                            "[transcript] 载入时清洗声音标记段 {} 条",
+                            before - segments.len()
+                        );
+                    }
                     return Transcript {
                         path: path.to_string(),
                         key,
                         lang: f.lang,
-                        segments: f.segments,
+                        segments,
                         windows: f.windows,
-                        dirty: false,
+                        dirty: purged,
                         last_flush: Instant::now(),
                     };
                 }
@@ -353,6 +394,21 @@ mod tests {
 
     fn seg(start: f64, end: f64, text: &str) -> Seg {
         Seg { start, end, text: text.to_string() }
+    }
+
+    #[test]
+    fn sound_markers_detected() {
+        // whisper 的各类舞台指示写法
+        for s in ["(音楽)", "[Music]", "(baby crying)", "(sobbing)", "(Sigh)",
+                  "[applause]", "♪", "♪~", "（笑）", "(笑)", "[inaudible]", "♪~",
+                  "（掌声）", "[Laughter]", "  music  "] {
+            assert!(is_sound_marker(s), "应判定为声音标记: {s}");
+        }
+        // 真实台词不能误伤
+        for s in ["音楽が好きです", "I love music", "音乐不错", "なんかまた行ったなぁ",
+                  "这个背景音乐是谁唱的", "Laugh out loud and clap"] {
+            assert!(!is_sound_marker(s), "不应误判为声音标记: {s}");
+        }
     }
 
     #[test]
