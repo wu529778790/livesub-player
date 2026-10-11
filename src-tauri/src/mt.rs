@@ -161,7 +161,7 @@ pub fn shutdown(app: &AppHandle) {
     let st = app.state::<MtState>();
     let mut guard = st.child.lock().unwrap();
     if let Some(mut child) = guard.take() {
-        eprintln!("[mt] 收割 llama-server (pid {:?})", child.id());
+        log::info!("[mt] 收割 llama-server (pid {:?})", child.id());
         let _ = child.kill();
         let _ = child.wait();
     }
@@ -176,7 +176,7 @@ pub fn cmd_mt_set_engine(app: AppHandle, engine: String) -> Result<(), String> {
     // 重置不可用标记：切引擎给一次重新尝试的机会
     crate::settings::write("mt_engine", &engine)?;
     app.state::<MtState>().unavailable.store(false, Ordering::Relaxed);
-    eprintln!("[mt] 翻译引擎 → {engine}");
+    log::info!("[mt] 翻译引擎 → {engine}");
     Ok(())
 }
 
@@ -197,7 +197,7 @@ fn worker(app: AppHandle, rx: Receiver<TransJob>) {
         let st = app.state::<MtState>();
         if let Ok(bytes) = std::fs::read(&cache_path) {
             if let Ok(map) = serde_json::from_slice::<HashMap<String, String>>(&bytes) {
-                eprintln!("[mt] 磁盘缓存载入 {} 条", map.len());
+                log::info!("[mt] 磁盘缓存载入 {} 条", map.len());
                 *st.cache.lock().unwrap() = map;
             }
         }
@@ -253,7 +253,7 @@ fn flush(app: &AppHandle, batch: &mut Vec<TransJob>, cache_path: &PathBuf) {
 
     // 2. 按引擎路由（产品决策：自动=在线优先→本地兜底；失败时提示下载本地模型）
     let engine = engine_setting();
-    eprintln!(
+    log::info!(
         "[mt] 引擎={}，批 {} 句",
         match engine {
             Engine::Auto => "auto",
@@ -264,12 +264,12 @@ fn flush(app: &AppHandle, batch: &mut Vec<TransJob>, cache_path: &PathBuf) {
     );
     let result = match engine {
         Engine::OnlineOnly => online_translate(&lines).map_err(|e| {
-            eprintln!("[mt] 在线翻译失败: {e}");
+            log::error!("[mt] 在线翻译失败: {e}");
             let _ = app.emit("mt://need-local-model", "在线翻译不可用");
             e
         }),
         Engine::LocalOnly => local_translate(app, &lines).map_err(|e| {
-            eprintln!("[mt] 本地翻译失败: {e}");
+                log::error!("[mt] 本地翻译失败: {e}");
             app.state::<MtState>()
                 .unavailable
                 .store(true, Ordering::Relaxed);
@@ -279,11 +279,11 @@ fn flush(app: &AppHandle, batch: &mut Vec<TransJob>, cache_path: &PathBuf) {
         Engine::Auto => match online_translate(&lines) {
             Ok(o) => Ok(o),
             Err(e) => {
-                eprintln!("[mt] 在线翻译失败（{e}），尝试本地兜底");
+                log::warn!("[mt] 在线翻译失败（{e}），尝试本地兜底");
                 match local_translate(app, &lines) {
                     Ok(o) => Ok(o),
                     Err(e2) => {
-                        eprintln!("[mt] 本地兜底失败: {e2}");
+                        log::error!("[mt] 本地兜底失败: {e2}");
                         let _ = app.emit(
                             "mt://need-local-model",
                             "在线翻译不可用，可下载本地模型兜底",
@@ -334,7 +334,7 @@ fn emit_translation(app: &AppHandle, job: &TransJob, dst: &str) {
             dst: dst.to_string(),
         },
     );
-    eprintln!("[mt] 译文: {}", dst);
+    log::debug!("[mt] 译文: {}", dst);
 }
 
 // ---------- llama-server sidecar ----------
@@ -369,7 +369,7 @@ fn ensure_server(app: &AppHandle) -> Result<u16, String> {
     }
 
     let port = pick_port().ok_or("找不到可用端口")?;
-    eprintln!("[mt] 拉起 llama-server :{port}（{}）", model.display());
+    log::info!("[mt] 拉起 llama-server :{port}（{}）", model.display());
     let child = std::process::Command::new(LLAMA_SERVER)
         .args([
             "-m",
@@ -395,7 +395,7 @@ fn ensure_server(app: &AppHandle) -> Result<u16, String> {
     for _ in 0..200 {
         if let Ok(resp) = ureq::get(&health).timeout(Duration::from_millis(1500)).call() {
             if resp.status() == 200 {
-                eprintln!("[mt] llama-server 就绪 :{port}");
+                log::info!("[mt] llama-server 就绪 :{port}");
                 return Ok(port);
             }
         }

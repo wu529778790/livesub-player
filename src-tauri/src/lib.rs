@@ -7,7 +7,32 @@ mod update;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 日志级别：默认 Info，LIVESUB_LOG=debug/trace 可调详（排查 bug 用）
+    let log_level = std::env::var("LIVESUB_LOG")
+        .map(|v| match v.to_ascii_lowercase().as_str() {
+            "debug" => log::LevelFilter::Debug,
+            "trace" => log::LevelFilter::Trace,
+            "warn" => log::LevelFilter::Warn,
+            "error" => log::LevelFilter::Error,
+            _ => log::LevelFilter::Info,
+        })
+        .unwrap_or(log::LevelFilter::Info);
     tauri::Builder::default()
+        // 日志插件必须最先注册（先于 dialog/updater），才能接到它们的日志
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .level(log_level)
+                .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepAll)
+                .timezone_strategy(tauri_plugin_log::TimezoneStrategy::UseLocal)
+                .targets([
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                        file_name: Some("livesub-player".into()),
+                    }),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Webview),
+                ])
+                .build(),
+        )
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(player::PlayerState::default())
@@ -35,6 +60,18 @@ pub fn run() {
             update::cmd_install_update,
         ])
         .setup(|app| {
+            use tauri::Manager;
+
+            // 每份日志开头自述：版本 + 日志目录（用户把日志发来即可定位）
+            log::info!(
+                "LiveSub-Player v{} 启动（日志目录：{}）",
+                app.package_info().version,
+                app.path()
+                    .app_log_dir()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| "未知".into()),
+            );
+
             // 标准应用菜单：macOS 上提供 ⌘Q 退出/⌘C⌘V 编辑/最小化全屏关闭等系统默认行为；
             // 没有菜单时 Tauri 应用不响应 ⌘Q（用户预期）
             #[cfg(target_os = "macos")]
@@ -90,7 +127,7 @@ pub fn run() {
                     std::thread::spawn(move || {
                         std::thread::sleep(std::time::Duration::from_millis(800));
                         if let Err(e) = player::player_load(&handle, path) {
-                            eprintln!("[player] 自动加载失败: {e}");
+                            log::error!("[player] 自动加载失败: {e}");
                         }
                         // 自动化验证钩子：LIVESUB_AUTO_SEEK=秒，LIVESUB_AUTO_SEEK_DELAY_MS=延迟（默认 4000）
                         if let Ok(t) = std::env::var("LIVESUB_AUTO_SEEK") {
@@ -100,9 +137,9 @@ pub fn run() {
                                     .and_then(|s| s.parse().ok())
                                     .unwrap_or(4000);
                                 std::thread::sleep(std::time::Duration::from_millis(delay));
-                                eprintln!("[player] 自动 seek 到 {t}s");
+                                log::info!("[player] 自动 seek 到 {t}s");
                                 if let Err(e) = player::player_seek(&handle, t, true) {
-                                    eprintln!("[player] 自动 seek 失败: {e}");
+                                    log::error!("[player] 自动 seek 失败: {e}");
                                 }
                             }
                         }

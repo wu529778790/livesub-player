@@ -95,7 +95,7 @@ pub fn cmd_model_delete(name: String) -> Result<(), String> {
     let p = dir.join(spec.dest);
     if p.is_file() {
         std::fs::remove_file(&p).map_err(|e| e.to_string())?;
-        eprintln!("[models] 已删除 {}", p.display());
+        log::info!("[models] 已删除 {}", p.display());
     }
     Ok(())
 }
@@ -134,7 +134,7 @@ pub fn cmd_model_download(app: AppHandle, name: String) -> Result<(), String> {
     let dir = models_dir()?;
     let dest = dir.join(spec.dest);
     if dest.exists() {
-        eprintln!("[models] {} 已存在，跳过下载", dest.display());
+        log::info!("[models] {} 已存在，跳过下载", dest.display());
         state.downloading.store(false, Ordering::SeqCst);
         let _ = app.emit("models://done", DoneEvent { name: name.clone() });
         return Ok(());
@@ -147,11 +147,11 @@ pub fn cmd_model_download(app: AppHandle, name: String) -> Result<(), String> {
         app2.state::<ModelsState>().downloading.store(false, Ordering::SeqCst);
         match r {
             Ok(()) => {
-                eprintln!("[models] {} 下载完成", dest.display());
+                log::info!("[models] {} 下载完成", dest.display());
                 let _ = app2.emit("models://done", DoneEvent { name: name2 });
             }
             Err(e) => {
-                eprintln!("[models] 下载失败: {e}");
+                log::error!("[models] 下载失败: {e}");
                 let _ = app2.emit("models://error", e);
             }
         }
@@ -170,7 +170,7 @@ fn download(app: &AppHandle, name: &str, url: &str, dest: &PathBuf) -> Result<()
     let part = dest.with_extension("part");
     let mut start: u64 = part.metadata().map(|m| m.len()).unwrap_or(0);
     if start > 0 {
-        eprintln!("[models] 断点续传自 {:.1}MB", start as f64 / 1048576.0);
+        log::info!("[models] 断点续传自 {:.1}MB", start as f64 / 1048576.0);
     }
 
     let mut req = agent.get(url);

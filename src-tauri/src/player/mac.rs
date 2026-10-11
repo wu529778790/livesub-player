@@ -250,7 +250,7 @@ fn render_frame(r: &RenderShared) {
         static LOGGED: AtomicU32 = AtomicU32::new(0);
         let n = LOGGED.fetch_add(1, Ordering::SeqCst);
         if n < 3 {
-            eprintln!("[render] 第{n}帧 w={w} h={h} stride={stride} rc={rc}");
+            log::debug!("[render] 第{n}帧 w={w} h={h} stride={stride} rc={rc}");
         }
         if rc < 0 {
             return;
@@ -311,19 +311,19 @@ fn commit_frame(bgra: &Vec<u8>, w: u32, h: u32, stride: usize) {
         CFRelease(provider);
         CFRelease(space);
         if image.is_null() {
-            eprintln!("[render] CGImageCreate 失败");
+            log::error!("[render] CGImageCreate 失败");
             return;
         }
         if let Some(layer) = ns_view.layer() {
             let frame_obj = image.cast::<objc2::runtime::AnyObject>();
             let () = msg_send![&*layer, setContents: frame_obj];
         } else {
-            eprintln!("[render] layer 不存在");
+            log::error!("[render] layer 不存在");
         }
         CFRelease(image);
         static COMMIT_LOGGED: AtomicU32 = AtomicU32::new(0);
         if COMMIT_LOGGED.fetch_add(1, Ordering::SeqCst) < 3 {
-            eprintln!("[render] 已提交帧 w={w} h={h}");
+            log::debug!("[render] 已提交帧 w={w} h={h}");
         }
     }
 }
@@ -504,9 +504,9 @@ unsafe fn event_loop(app: AppHandle, client: MpvPtr) {
                     for sub in subs {
                         let c_sub = CString::new(sub.to_string_lossy().as_bytes()).unwrap();
                         if cmd(client, &[c"sub-add", c_sub.as_c_str(), c"auto"]).is_err() {
-                            eprintln!("[player] sub-add 失败: {}", sub.display());
+                            log::error!("[player] sub-add 失败: {}", sub.display());
                         } else {
-                            eprintln!("[player] 外挂字幕已挂: {}", sub.display());
+                            log::info!("[player] 外挂字幕已挂: {}", sub.display());
                         }
                     }
                 }
@@ -519,7 +519,20 @@ unsafe fn event_loop(app: AppHandle, client: MpvPtr) {
                     let level = if (*m).level.is_null() { c"?" } else { CStr::from_ptr((*m).level) };
                     let prefix = if (*m).prefix.is_null() { c"" } else { CStr::from_ptr((*m).prefix) };
                     let text = CStr::from_ptr((*m).text).to_string_lossy();
-                    eprintln!("[mpv:{}] {}: {}", level.to_string_lossy(), prefix.to_string_lossy(), text.trim_end());
+                    // mpv 日志按其级别落入文件（fatal/error→error，warn→warn，info→info，其余→debug）
+                    let mpv_level = level.to_string_lossy().into_owned();
+                    let line = format!(
+                        "[mpv:{}] {}: {}",
+                        mpv_level,
+                        prefix.to_string_lossy(),
+                        text.trim_end()
+                    );
+                    match mpv_level.as_str() {
+                        "fatal" | "error" => log::error!("{line}"),
+                        "warn" => log::warn!("{line}"),
+                        "info" => log::info!("{line}"),
+                        _ => log::debug!("{line}"),
+                    }
                 }
                 MPV_EVENT_PROPERTY_CHANGE => {
                     let prop = (*ev).data as *mut mpv_event_property;
@@ -623,7 +636,7 @@ fn ensure_utf8(p: &Path) -> PathBuf {
         );
         let out = dir.join(name);
         if std::fs::write(&out, decoded.as_bytes()).is_ok() {
-            eprintln!("[player] 字幕 GBK→UTF-8: {}", p.display());
+            log::info!("[player] 字幕 GBK→UTF-8: {}", p.display());
             return out;
         }
     }
@@ -650,7 +663,7 @@ pub fn player_load(app: &AppHandle, path: String) -> Result<(), String> {
         let ctx = match ensure_mpv(&window) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("[player] {e}");
+                log::error!("[player] {e}");
                 return;
             }
         };
@@ -664,7 +677,7 @@ pub fn player_load(app: &AppHandle, path: String) -> Result<(), String> {
             let client_name = c"livesub-events";
             let client = mpv_create_client(ctx, client_name.as_ptr());
             if client.is_null() {
-                eprintln!("[player] 事件 client 创建失败");
+                log::error!("[player] 事件 client 创建失败");
             } else {
                 mpv_request_log_messages(client, c"info".as_ptr());
                 for (name, fmt) in [
@@ -689,7 +702,7 @@ pub fn player_load(app: &AppHandle, path: String) -> Result<(), String> {
                 return;
             }
         }
-        eprintln!("[player] loadfile: {path}");
+        log::info!("[player] loadfile: {path}");
 
         // 实时识别管线启动（模型缺失时只发事件，不影响播放）
         crate::asr::on_video_start(app, path.clone());

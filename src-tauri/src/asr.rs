@@ -117,7 +117,7 @@ fn worker(app: AppHandle, rx: Receiver<Msg>) {
             "asr://error",
             "未找到 whisper 模型：请把 ggml-small.bin 放入 ~/.livesub-player/models/（M4 将提供下载管理）",
         );
-        eprintln!("[asr] 模型缺失，识别管线不启动");
+        log::error!("[asr] 模型缺失，识别管线不启动");
         return;
     };
     let t0 = Instant::now();
@@ -129,7 +129,7 @@ fn worker(app: AppHandle, rx: Receiver<Msg>) {
             return;
         }
     };
-    eprintln!(
+    log::info!(
         "[asr] 模型加载完成 {:.2}s（{}）",
         t0.elapsed().as_secs_f64(),
         model_path.display()
@@ -171,11 +171,11 @@ fn run_session(
     let mut pos = start_pos;
 
     'session: loop {
-        eprintln!("[asr] 会话开始：{current_path} 自 {pos:.1}s");
+        log::info!("[asr] 会话开始：{current_path} 自 {pos:.1}s");
         let mut child = match spawn_ffmpeg(&current_path, pos) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("[asr] {e}");
+                log::error!("[asr] {e}");
                 let _ = app.emit("asr://error", e);
                 return;
             }
@@ -202,7 +202,7 @@ fn run_session(
                 }
                 Poll::Restart { pos: p, path: np } => {
                     let _ = child.kill();
-                    eprintln!("[asr] 识别中收到 seek/换片 → 重启会话 @{p:.1}s");
+                    log::info!("[asr] 识别中收到 seek/换片 → 重启会话 @{p:.1}s");
                     pos = p;
                     if let Some(np) = np {
                         current_path = np;
@@ -216,7 +216,7 @@ fn run_session(
             match read_exact_or_eof(&mut stdout, &mut byte_buf) {
                 ReadOutcome::Full => {}
                 ReadOutcome::Eof => {
-                    eprintln!("[asr] 音频读到结尾，会话结束（共 {window_idx} 窗）");
+                    log::info!("[asr] 音频读到结尾，会话结束（共 {window_idx} 窗）");
                     let _ = child.kill();
                     return;
                 }
@@ -247,7 +247,7 @@ fn run_session(
                     }
                     Poll::Restart { pos: p, path: np } => {
                         let _ = child.kill();
-                        eprintln!("[asr] 等待中收到 seek/换片 → 重启会话 @{p:.1}s");
+                        log::info!("[asr] 等待中收到 seek/换片 → 重启会话 @{p:.1}s");
                         pos = p;
                         if let Some(np) = np {
                             current_path = np;
@@ -275,13 +275,13 @@ fn run_session(
             let mut state = match ctx.create_state() {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("[asr] create_state 失败: {e}");
+                    log::error!("[asr] create_state 失败: {e}");
                     let _ = child.kill();
                     return;
                 }
             };
             if let Err(e) = state.full(make_params(detected_lang.as_deref()), &samples) {
-                eprintln!("[asr] 推理失败: {e}");
+                log::error!("[asr] 推理失败: {e}");
                 window_idx += 1;
                 continue;
             }
@@ -289,12 +289,12 @@ fn run_session(
             if detected_lang.is_none() {
                 if let Ok(id) = state.full_lang_id_from_state() {
                     if let Some(code) = whisper_rs::get_lang_str(id) {
-                        eprintln!("[asr] 检测语言: {code}");
+                        log::info!("[asr] 检测语言: {code}");
                         detected_lang = Some(code.to_string());
                     }
                 }
             }
-            eprintln!(
+            log::debug!(
                 "[asr] 窗 {window_idx} [{window_start:.1}-{window_end:.1}] 推理 {:.2}s（语音占比 {:.0}%)",
                 t_infer.elapsed().as_secs_f64(),
                 speech_ratio * 100.0
@@ -327,7 +327,7 @@ fn run_session(
                     window_start + state.full_get_segment_t0(i).unwrap_or(0) as f64 / 100.0;
                 let seg_end =
                     window_start + state.full_get_segment_t1(i).unwrap_or(0) as f64 / 100.0;
-                eprintln!("[asr] 字幕 [{seg_start:.1}-{seg_end:.1}] {text}");
+                log::info!("[asr] 字幕 [{seg_start:.1}-{seg_end:.1}] {text}");
                 let _ = app.emit(
                     "asr://subtitle",
                     SubtitleEvent { start: seg_start, end: seg_end, text: text.clone() },
