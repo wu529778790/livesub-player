@@ -6,7 +6,8 @@
         <path d="M19 16.2 33.4 24 19 31.8Z" fill="#16121c" />
       </svg>
       <span class="filename">{{ filename || "LiveSub-Player" }}</span>
-      <button class="bar-btn" @click="settingsOpen = true; playlistOpen = false">设置</button>
+      <!-- 设置入口：欢迎页常驻顶栏（彼时无控制栏）；播放中入口在底部控制栏齿轮 -->
+      <button v-if="!loaded" class="bar-btn" @click="settingsOpen = true; playlistOpen = false">设置</button>
     </header>
 
     <!-- 设置弹窗：居中模态（✕/Esc/点遮罩关闭）——低频配置用完即走，不占侧边遮挡播放画面 -->
@@ -174,7 +175,7 @@
         <span>播放列表{{ playlist.length ? `（${playlist.length}）` : "" }}</span>
         <button class="drawer-close" title="关闭" @click="playlistOpen = false">✕</button>
       </div>
-      <button class="btn small ghost set-btn" @click="openFolder">打开文件夹…</button>
+      <button class="btn small ghost set-btn" @click="openFile">打开视频…</button>
       <div class="pl-list">
         <template v-if="playlist.length">
           <button
@@ -189,7 +190,7 @@
             <span class="pl-name">{{ filenameOf(p) }}</span>
           </button>
         </template>
-        <p v-else class="set-hint">列表还是空的：打开一个文件夹，里面的视频会排进来；正在播的也会显示在这里。播完一条自动接下一条。</p>
+        <p v-else class="set-hint">列表还是空的：选一个视频，它所在的文件夹会自动排进来；正在播的也会显示在这里。播完一条自动接下一条。</p>
       </div>
       </div>
     </transition>
@@ -412,6 +413,9 @@
       />
       <button class="ctl-btn" title="播放列表（菜单 文件 → 播放列表）" aria-label="播放列表" @click="togglePlaylist">
         <svg viewBox="0 0 24 24"><path d="M3 6h13v2H3zM3 12h13v2H3zM3 18h9v2H3zM15.5 13.5l6 3.5-6 3.5z" /></svg>
+      </button>
+      <button class="ctl-btn" title="设置" aria-label="设置" @click="settingsOpen = true; playlistOpen = false">
+        <svg viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.49.49 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.49.49 0 0 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z" /></svg>
       </button>
       <button class="ctl-btn" title="截图到桌面（S）" aria-label="截图" @click="screenshot">
         <svg viewBox="0 0 24 24" fill-rule="evenodd"><path d="M9 3 7.17 5H4a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-3.17L15 3H9zm3 4.5a4.5 4.5 0 1 1 0 9 4.5 4.5 0 0 1 0-9zm0 2a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z" /></svg>
@@ -881,7 +885,6 @@ onMounted(async () => {
   await listen<string>("menu://action", (e) => {
     const id = e.payload;
     if (id === "open-file") void openFile();
-    else if (id === "open-folder") void openFolder();
     else if (id === "close-video") void closeVideo();
     else if (id === "toggle-playlist") togglePlaylist();
     else if (id === "export-subs") void exportSubs();
@@ -915,9 +918,9 @@ onMounted(async () => {
     if (String(e.payload) === "已取消") showToast("已取消导出");
     else showError(`导出失败: ${e.payload}`);
   });
-  await listen<string>("mt://unavailable", () => {
+  await listen<string>("mt://unavailable", (e) => {
     mtAvailable.value = false;
-    showToast("本地翻译暂不可用，可在设置中检查引擎与模型");
+    showError(`本地翻译不可用：${e.payload}`);
   });
   await listen("mt://available", () => {
     mtAvailable.value = true;
@@ -1564,7 +1567,14 @@ async function openFile() {
     multiple: false,
     filters: [{ name: "视频", extensions: VIDEO_EXTS }],
   });
-  if (typeof path === "string") await loadVideo(path);
+  if (typeof path !== "string") return;
+  // 选一个视频 = 播它 + 所在文件夹自动排成播放列表（PotPlayer 式）。
+  // 目录选择器已弃用：macOS 上「进入文件夹后 Open 置灰」反直觉，文件选择器没有这个问题
+  const dir = path.split("/").slice(0, -1).join("/");
+  const vids = await invoke<string[]>("cmd_scan_folder", { path: dir }).catch(() => [] as string[]);
+  playlist.value = vids.length ? vids : [path];
+  if (playlist.value.length > 1) showToast(`已载入播放列表（${playlist.value.length} 个视频）`);
+  void loadVideo(path);
 }
 
 // ---- 播放列表（文件夹批量）----
@@ -1586,19 +1596,6 @@ function filenameOf(p: string): string {
 function togglePlaylist() {
   settingsOpen.value = false;
   playlistOpen.value = !playlistOpen.value;
-}
-
-async function openFolder() {
-  const dir = await open({ directory: true });
-  if (typeof dir !== "string") return;
-  const vids = await invoke<string[]>("cmd_scan_folder", { path: dir }).catch(() => [] as string[]);
-  if (!vids.length) {
-    showToast("该文件夹里没有视频文件");
-    return;
-  }
-  playlist.value = vids;
-  settingsOpen.value = false;
-  playlistOpen.value = true;
 }
 
 function playFromPlaylist(p: string) {
@@ -2352,10 +2349,10 @@ onMounted(async () => {
   font-weight: 700;
 }
 
-/* 播放列表面板：右侧滑出、无遮罩，播放中可常开（PotPlayer 式）；随 UI 自动隐藏 */
+/* 播放列表面板：右侧贴顶通栏（PotPlayer 式），无遮罩、播放中可常开；随 UI 自动隐藏 */
 .pl-panel {
   position: fixed;
-  top: 40px;
+  top: 0;
   right: 0;
   bottom: 0;
   width: 300px;
@@ -2363,7 +2360,7 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding: 14px 14px 16px;
+  padding: 16px 14px;
   background: rgba(22, 22, 28, 0.92);
   border-left: 1px solid rgba(255, 255, 255, 0.12);
   box-shadow: -8px 0 24px rgba(0, 0, 0, 0.35);

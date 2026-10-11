@@ -92,10 +92,10 @@ fn build_impl(app: &AppHandle) -> Result<Menu<Wry>, tauri::Error> {
         .select_all()
         .build()?;
 
-    // 文件：打开 / 文件夹 / 最近使用 / 关闭 / 播放列表 / 导出
+    // 文件：打开（选视频即播，所在文件夹自动成播放列表）/ 最近使用 / 关闭 / 播放列表 / 导出
+    // 目录选择器已弃用：macOS 上「进入文件夹后 Open 置灰」反直觉，文件选择器没有这个问题
     let file_submenu = SubmenuBuilder::new(app, "文件")
         .item(&MenuItem::with_id(app, "open-file", "打开…", true, Some("CmdOrCtrl+O"))?)
-        .item(&MenuItem::with_id(app, "open-folder", "打开文件夹…", true, Some("CmdOrCtrl+Shift+O"))?)
         .item(&recent_submenu(app)?)
         .separator()
         .item(&MenuItem::with_id(app, "close-video", "关闭", true, Some("CmdOrCtrl+W"))?)
