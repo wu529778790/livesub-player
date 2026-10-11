@@ -111,8 +111,12 @@ jobs:
           merge-multiple: true
 
       # Release 描述 = annotated tag 的注释（发版时直接写好 1/2/3，不用自动 changelog）
+      # 注意：actions/checkout 会把触发用的附注 tag 物化成「指向 commit 的轻量 tag」，
+      # 直接 %(contents) 读到的是 commit message——先从 origin 强制重取附注 tag 对象
       - name: 读取版本说明（tag 注释）
-        run: git tag -l --format='%(contents)' "${GITHUB_REF_NAME}" > release-notes.md
+        run: |
+          git fetch origin --force "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+          git tag -l --format='%(contents)' "${GITHUB_REF_NAME}" > release-notes.md
 
       # sha256 清单：install.sh 下载后校验，防下载损坏/篡改
       - name: 生成 SHA256 校验文件
