@@ -113,6 +113,17 @@ pub fn run() {
                 app.set_menu(menu)?;
             }
 
+            // Windows 播放子窗口跟随窗口尺寸（mpv --wid 渲染在 WebView 之下）
+            #[cfg(target_os = "windows")]
+            {
+                let handle = app.handle().clone();
+                app.on_window_event(move |_window, event| {
+                    if matches!(event, tauri::WindowEvent::Resized(_)) {
+                        player::on_parent_resized(&handle);
+                    }
+                });
+            }
+
             // 旧版「全局单槽上次播放」迁移为按文件的历史记录
             history::migrate_from_legacy_settings();
 

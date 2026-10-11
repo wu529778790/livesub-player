@@ -111,6 +111,11 @@ fn online_translate(lines: &[&str]) -> Result<Vec<String>, String> {
     Ok(outs)
 }
 
+/// 播放内核 libmpv-2.dll 位置（仅 Windows 使用；其余平台不会被调用）
+pub fn mpv_dll_path() -> PathBuf {
+    crate::settings::data_dir().join("bin").join("libmpv-2.dll")
+}
+
 pub struct MtState {
     tx: Mutex<Option<Sender<TransJob>>>,
     child: Mutex<Option<std::process::Child>>,

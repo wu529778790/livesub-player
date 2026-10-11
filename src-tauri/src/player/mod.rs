@@ -1,17 +1,22 @@
 //! M1 播放内核（平台分发）
 //!
 //! - macOS：libmpv 进程内 + NSView 垫底（spike-1 已验证）
-//! - Windows/Linux：M1-Windows 里程碑接入（子 HWND / X11 subwindow）；
-//!   当前提供 stub 命令保证跨平台可编译
+//! - Windows：libmpv 动态加载（libloading）+ 子 HWND 置底嵌入，WebView 透明透出
+//! - Linux：X11 subwindow 接入中，当前提供 stub 命令保证跨平台可编译
 
 #[cfg(target_os = "macos")]
 mod mac;
 #[cfg(target_os = "macos")]
 pub use mac::*;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+mod win;
+#[cfg(target_os = "windows")]
+pub use win::*;
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 mod stub;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub use stub::*;
 
 /// 支持的视频扩展名（与前端 VIDEO_EXTS 保持一致）

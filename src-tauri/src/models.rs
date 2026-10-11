@@ -45,6 +45,9 @@ struct ModelSpec {
 /// llama.cpp 预编译版固定 tag：含 llama-server 的 macOS arm64 构建。
 const LLAMA_CPP_RELEASE: &str =
     "https://github.com/ggml-org/llama.cpp/releases/download/b11552/llama-b11552-bin-macos-arm64.tar.gz";
+#[cfg(target_os = "windows")]
+const LLAMA_CPP_RELEASE: &str =
+    "https://github.com/ggml-org/llama.cpp/releases/download/b11552/llama-b11552-bin-win-cpu-x64.zip";
 
 /// 下载源：魔搭（阿里云 CDN，国内实测 ~18MB/s，7 倍于 hf-mirror）优先，
 /// hf-mirror 次之，HuggingFace 官方兜底
@@ -68,7 +71,10 @@ fn ms_then_hf(ms_repo_file: &str, hf_repo_file: &str) -> Vec<String> {
 
 /// 翻译引擎落盘路径（models.rs 负责下载解压，mt.rs 按此拉起）
 pub fn engine_bin() -> PathBuf {
-    crate::settings::data_dir().join("bin").join("llama-server")
+    #[cfg(target_os = "windows")]
+    return crate::settings::data_dir().join("bin").join("llama-server.exe");
+    #[cfg(not(target_os = "windows"))]
+    return crate::settings::data_dir().join("bin").join("llama-server");
 }
 
 /// 内置模型清单（方案 §4.3：JSON 配置内置，可随版本更新）
@@ -86,13 +92,21 @@ fn spec(name: &str) -> Option<ModelSpec> {
             desc: "语音识别·均衡档（~466MB，更准）",
             member: None,
         }),
-        // 引擎是 macOS 预编译二进制，其余平台发布物暂不可用，不列出
-        #[cfg(target_os = "macos")]
+        // 引擎按平台下载预编译二进制（llama.cpp release，包内扁平：主程序 + 依赖库）
         "translation-engine" => Some(ModelSpec {
             sources: vec![LLAMA_CPP_RELEASE.to_string()],
-            dest: "llama-server.tar.gz",
+            dest: if cfg!(target_os = "windows") { "llama-server.zip" } else { "llama-server.tar.gz" },
             desc: "本地翻译·引擎（~12MB，一次性下载）",
             member: Some("llama-server"),
+        }),
+        // 播放内核（仅 Windows）：libmpv-2.dll，播放器子窗口渲染用。
+        // mpv-dev 无固定文件名（日期+commit），下载时动态解析最新 release
+        #[cfg(target_os = "windows")]
+        "player-mpv" => Some(ModelSpec {
+            sources: vec!["https://api.github.com/repos/zhongfly/mpv-winbuild/releases/latest".into()],
+            dest: "libmpv-2.7z",
+            desc: "播放内核 libmpv（~31MB，一次性下载）",
+            member: Some("libmpv-2.dll"),
         }),
         // 腾讯官方 GGUF，魔搭有镜像（tencent/HY-MT1.5-1.8B-GGUF），Q4_K_M ~1.1GB
         "translation-light" => Some(ModelSpec {
@@ -117,6 +131,16 @@ fn spec(name: &str) -> Option<ModelSpec> {
 }
 
 /// 全部已知模型（状态页展示顺序；引擎在模型之后——先有引擎模型才能用）
+#[cfg(target_os = "windows")]
+const KNOWN_MODELS: [&str; 6] = [
+    "whisper-base",
+    "whisper-small",
+    "translation-light",
+    "translation",
+    "translation-engine",
+    "player-mpv",
+];
+#[cfg(not(target_os = "windows"))]
 const KNOWN_MODELS: [&str; 5] =
     ["whisper-base", "whisper-small", "translation-light", "translation", "translation-engine"];
 
@@ -135,9 +159,13 @@ pub fn cmd_model_status() -> Result<Vec<ModelStatus>, String> {
     let mut out = Vec::new();
     for name in KNOWN_MODELS {
         let Some(spec) = spec(name) else { continue };
-        // 引擎的「已装」看有效性（主程序 + 依赖 dylib 齐全；压缩包下载完即删）
-        let (installed_path, installed) = if spec.member.is_some() {
+        // 引擎的「已装」看有效性（主程序 + 依赖库齐全；压缩包下载完即删）；
+        // 播放内核看解压出的 libmpv-2.dll
+        let (installed_path, installed) = if name == "translation-engine" {
             (engine_bin(), engine_valid())
+        } else if name == "player-mpv" {
+            let dll = crate::mt::mpv_dll_path();
+            (dll.clone(), dll.is_file())
         } else {
             let p = dir.join(spec.dest);
             (p.clone(), p.is_file())
@@ -160,6 +188,16 @@ pub fn cmd_model_status() -> Result<Vec<ModelStatus>, String> {
 pub fn cmd_model_delete(name: String) -> Result<(), String> {
     let dir = models_dir()?;
     let spec = spec(&name).ok_or(format!("未知模型: {name}"))?;
+    if name == "player-mpv" {
+        let dll = crate::mt::mpv_dll_path();
+        if dll.is_file() {
+            std::fs::remove_file(&dll).map_err(|e| e.to_string())?;
+            log::info!("[models] 已删除 {}", dll.display());
+        }
+        let pack = dir.join(spec.dest);
+        let _ = std::fs::remove_file(&pack);
+        return Ok(());
+    }
     if spec.member.is_some() {
         let bin = engine_bin();
         if bin.is_file() {
@@ -213,8 +251,14 @@ pub fn cmd_model_download(app: AppHandle, name: String) -> Result<(), String> {
     };
     let dir = models_dir()?;
     let dest = dir.join(spec.dest);
-    // 引擎的「已存在」看解压后的二进制，而不是临时压缩包
-    let already = if spec.member.is_some() { engine_bin() } else { dest.clone() };
+    // 引擎的「已存在」看解压后的二进制，而不是临时压缩包；播放内核看 dll
+    let already = if name == "translation-engine" {
+        engine_bin()
+    } else if name == "player-mpv" {
+        crate::mt::mpv_dll_path()
+    } else {
+        dest.clone()
+    };
     if already.exists() {
         log::info!("[models] {} 已存在，跳过下载", already.display());
         state.downloading.store(false, Ordering::SeqCst);
@@ -228,9 +272,23 @@ pub fn cmd_model_download(app: AppHandle, name: String) -> Result<(), String> {
     let name2 = name.clone();
     std::thread::spawn(move || {
         // 按源顺序下载，每源 2 次重试；暂停/取消立即返回（.part 保留供续传）
+        // player-mpv：mpv-dev 无固定文件名（日期+commit），先从最新 release 动态解析
+        let resolved: Vec<String> = if name2 == "player-mpv" {
+            match resolve_latest_mpv_dev() {
+                Ok(u) => vec![u],
+                Err(e) => {
+                    log::error!("[models] 解析 mpv-dev 地址失败: {e}");
+                    app2.state::<ModelsState>().downloading.store(false, Ordering::SeqCst);
+                    let _ = app2.emit("models://error", e);
+                    return;
+                }
+            }
+        } else {
+            spec.sources.clone()
+        };
         let mut last_err = String::new();
         let mut outcome: Option<DlOutcome> = None;
-        'sources: for (si, src) in spec.sources.iter().enumerate() {
+        'sources: for (si, src) in resolved.iter().enumerate() {
             for attempt in 0..2 {
                 if si + attempt > 0 {
                     log::warn!("[models] {} 第 {} 次尝试 {}（上次：{}）", name2, si * 2 + attempt + 1, src, last_err);
@@ -255,16 +313,25 @@ pub fn cmd_model_download(app: AppHandle, name: String) -> Result<(), String> {
 
         match outcome {
             Some(DlOutcome::Done) => {
-                // 引擎：tar.gz 内是扁平目录（主程序 + 全部依赖 dylib），整体解到 bin/
+                // member 包：按格式分派——tar.gz=mac 引擎（含软链）/ zip=win 引擎（扁平）/
+                // 7z=mpv 内核（抽取 libmpv-2.dll 单文件）
                 if spec.member.is_some() {
                     let bin = engine_bin();
                     let extract = (|| -> Result<(), String> {
                         if let Some(parent) = bin.parent() {
                             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
                         }
-                        extract_engine_pack(&dest, bin.parent().expect("bin 必有父目录"))?;
+                        let out_dir = bin.parent().expect("bin 必有父目录");
+                        match dest.extension().and_then(|e| e.to_str()) {
+                            Some("gz") => extract_engine_pack(&dest, out_dir)?,
+                            #[cfg(target_os = "windows")]
+                            Some("zip") => extract_zip_pack(&dest, out_dir)?,
+                            #[cfg(target_os = "windows")]
+                            Some("7z") => extract_7z_member(&dest, spec.member.as_deref().unwrap_or("libmpv-2.dll"), out_dir)?,
+                            _ => return Err(format!("未知的引擎包格式: {}", dest.display())),
+                        }
                         let _ = std::fs::remove_file(&dest);
-                        log::info!("[models] 引擎已解压到 {}（含全部依赖 dylib）", bin.display());
+                        log::info!("[models] 引擎已解压到 {}（含全部依赖库）", bin.display());
                         Ok(())
                     })();
                     if let Err(e) = extract {
@@ -376,19 +443,97 @@ fn extract_engine_pack(archive: &Path, out_dir: &Path) -> Result<(), String> {
     engine_valid_or_err(out_dir)
 }
 
+/// llama.cpp Windows 包：扁平目录（llama-server.exe + 全部依赖 dll），全部解到 bin/
+#[cfg(target_os = "windows")]
+fn extract_zip_pack(archive: &Path, out_dir: &Path) -> Result<(), String> {
+    let f = std::fs::File::open(archive).map_err(|e| format!("打开压缩包失败: {e}"))?;
+    let mut z = zip::ZipArchive::new(f).map_err(|e| format!("读取 zip 失败: {e}"))?;
+    std::fs::create_dir_all(out_dir).map_err(|e| e.to_string())?;
+    for i in 0..z.len() {
+        let mut entry = z.by_index(i).map_err(|e| format!("读取 zip 条目失败: {e}"))?;
+        if entry.is_dir() {
+            continue;
+        }
+        let Some(fname) = entry.enclosed_name().and_then(|p| p.file_name().map(|x| x.to_owned())) else { continue };
+        let out = out_dir.join(fname);
+        let mut out_f = std::fs::File::create(&out).map_err(|e| format!("解压失败: {e}"))?;
+        std::io::copy(&mut entry, &mut out_f).map_err(|e| format!("解压失败: {e}"))?;
+    }
+    Ok(())
+}
+
+/// mpv-dev 7z：整包解到临时目录后只取 libmpv-2.dll（包内还有头文件等，不落 bin/）
+#[cfg(target_os = "windows")]
+fn extract_7z_member(archive: &Path, member: &str, out_dir: &Path) -> Result<(), String> {
+    let tmp = out_dir.join(".mpv-dev-tmp");
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
+    sevenz_rust::decompress_file(archive, &tmp).map_err(|e| format!("解压 7z 失败: {e}"))?;
+    let src = tmp.join(member);
+    if !src.is_file() {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(format!("压缩包内未找到 {member}"));
+    }
+    let dest = out_dir.join(member);
+    std::fs::rename(&src, &dest)
+        .or_else(|_| std::fs::copy(&src, &dest).map(|_| ()))
+        .map_err(|e| format!("移动 {member} 失败: {e}"))?;
+    let _ = std::fs::remove_dir_all(&tmp);
+    Ok(())
+}
+
+/// 解析 zhongfly/mpv-winbuild 最新 release 的 mpv-dev-x86_64-*.7z（排除 v3，兼容老 CPU）。
+/// 包名带日期+commit 没有固定 URL，只能动态解析；每次下载查一次 API（限流 60 次/时够用）
+fn resolve_latest_mpv_dev() -> Result<String, String> {
+    let resp = ureq::get("https://api.github.com/repos/zhongfly/mpv-winbuild/releases/latest")
+        .timeout(std::time::Duration::from_secs(30))
+        .call()
+        .map_err(|e| format!("查询 mpv-dev release 失败: {e}"))?;
+    let text = resp.into_string().map_err(|e| e.to_string())?;
+    let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let assets = v["assets"].as_array().ok_or("release 响应缺 assets")?;
+    for a in assets {
+        let name = a["name"].as_str().unwrap_or("");
+        if name.starts_with("mpv-dev-x86_64-2") && name.ends_with(".7z") {
+            return Ok(a["browser_download_url"]
+                .as_str()
+                .ok_or("资产缺下载地址")?
+                .to_string());
+        }
+    }
+    Err("最新 release 里没有 mpv-dev-x86_64 包".into())
+}
+
 /// 引擎可用的判定：主程序 + 其依赖 dylib 都在（旧版只解主程序的安装视为未装，触发重下）
 pub fn engine_valid() -> bool {
     let bin = engine_bin();
-    bin.is_file() && bin.with_file_name("libllama-server-impl.dylib").is_file()
+    #[cfg(target_os = "macos")]
+    return bin.is_file() && bin.with_file_name("libllama-server-impl.dylib").is_file();
+    #[cfg(target_os = "windows")]
+    return bin.is_file() && bin.with_file_name("llama-server-impl.dll").is_file();
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    return false;
 }
 
 fn engine_valid_or_err(dir: &Path) -> Result<(), String> {
-    let bin = dir.join("llama-server");
-    if bin.is_file() && bin.with_file_name("libllama-server-impl.dylib").is_file() {
-        Ok(())
-    } else {
+    #[cfg(target_os = "macos")]
+    {
+        let bin = dir.join("llama-server");
+        if bin.is_file() && bin.with_file_name("libllama-server-impl.dylib").is_file() {
+            return Ok(());
+        }
         Err("引擎包不完整（缺少 llama-server 或其依赖 dylib）".into())
     }
+    #[cfg(target_os = "windows")]
+    {
+        let bin = dir.join("llama-server.exe");
+        if bin.is_file() && dir.join("llama-server-impl.dll").is_file() {
+            return Ok(());
+        }
+        Err("引擎包不完整（缺少 llama-server.exe 或其依赖 dll）".into())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    Err("该平台暂无引擎".into())
 }
 
 fn download(app: &AppHandle, name: &str, url: &str, dest: &PathBuf) -> Result<DlOutcome, String> {
