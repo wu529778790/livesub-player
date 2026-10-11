@@ -117,8 +117,8 @@ pub fn run() {
             // 注意：App::on_window_event 是 builder 方法（mut self），setup 里只能用
             // Window::on_window_event（&self）
             #[cfg(target_os = "windows")]
-            if let Some(main) = app.get_webview_window("main") {
-                let handle = app.handle().clone();
+            if let Some(main) = tauri::Manager::get_webview_window(app, "main") {
+                let handle = tauri::Manager::app_handle(app).clone();
                 main.on_window_event(move |event| {
                     if matches!(event, tauri::WindowEvent::Resized(_)) {
                         player::on_parent_resized(&handle);
