@@ -443,7 +443,10 @@ fn run_session_inner(
                     .unwrap_or_default()
                     .trim()
                     .to_string();
-                if text.is_empty() || crate::transcript::is_sound_marker(&text) {
+                if text.is_empty()
+                    || crate::transcript::is_sound_marker(&text)
+                    || crate::transcript::is_hallucination(&text)
+                {
                     continue;
                 }
                 // TODO(M2.1): whisper-rs 0.14 未暴露段落级 no_speech_prob；
@@ -1044,7 +1047,10 @@ fn process_range(
                 .unwrap_or_default()
                 .trim()
                 .to_string();
-            if text.is_empty() || crate::transcript::is_sound_marker(&text) {
+            if text.is_empty()
+                || crate::transcript::is_sound_marker(&text)
+                || crate::transcript::is_hallucination(&text)
+            {
                 continue;
             }
             // 连续重复行去重（与实时管线同一套幻觉治理）

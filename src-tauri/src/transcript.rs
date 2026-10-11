@@ -53,6 +53,53 @@ pub fn is_sound_marker(text: &str) -> bool {
     MARKERS.iter().any(|m| cleaned == *m)
 }
 
+/// whisper 幻觉治理第二层：whisper.cpp 库内的置信度门（logprob+no_speech_prob
+/// 联合判断）拦不住「模型很自信的幻觉」——如安静场景的「error error error ×7」。
+/// 按内容特征识别：
+/// 1. 去标点分词后 ≥3 个词且整段由连续相同的词构成（error error error…）
+/// 2. 已知幻觉短语（社区长期积累的多语言固定输出，整段等值匹配）
+/// 3. 全段为同一字符重复 ≥6 次（哈哈哈哈哈哈）
+pub fn is_hallucination(text: &str) -> bool {
+    let words: Vec<String> = text
+        .split(|c: char| {
+            c.is_whitespace()
+                || matches!(c, ',' | '.' | '，' | '。' | '、' | '!' | '！' | '?' | '？' | '~' | '～')
+        })
+        .filter(|w| !w.is_empty())
+        .map(|w| w.to_lowercase())
+        .collect();
+    if words.len() >= 3 && words.windows(2).all(|w| w[0] == w[1]) {
+        return true;
+    }
+    let chars: Vec<char> = text.chars().filter(|c| !c.is_whitespace()).collect();
+    if chars.len() >= 6 && chars.iter().all(|c| *c == chars[0]) {
+        return true;
+    }
+    let normalized: String = chars
+        .iter()
+        .filter(|c| {
+            !matches!(c, '.' | '。' | '、' | ',' | '!' | '！' | '?' | '？' | '~' | '～' | '♪')
+        })
+        .collect::<String>()
+        .to_lowercase();
+    const HALLUCINATIONS: [&str; 8] = [
+        "thankyouforwatching",
+        "thanksforwatching",
+        "subscribetomychannel",
+        "pleaselikeandsubscribe",
+        "明镜与点点栏目",
+        "请不吝点赞订阅转发打赏支持明镜与点点栏目",
+        "チャンネル登録お願いします",
+        "チャンネル登録よろしくお願いします",
+    ];
+    if HALLUCINATIONS.iter().any(|h| normalized == *h) {
+        return true;
+    }
+    // Amara 字幕水印有固定变体（Subtitles by Amara.org / 字幕由 Amara.org 提供），
+    // 水印词本身极难出现在真实台词里，用包含匹配
+    normalized.contains("amara")
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Seg {
     pub start: f64,
@@ -125,10 +172,10 @@ impl Transcript {
             if let Ok(f) = serde_json::from_slice::<TranscriptFile>(&bytes) {
                 if f.path == path {
                     log::info!("[transcript] 字幕库命中：{}（{} 段）", path, f.segments.len());
-                    // 旧库存里的声音标记段（whisper 的 (音楽)/[Music] 类输出）惰性清洗
+                    // 旧库存里的声音标记/幻觉段（whisper 的 (音楽)/[Music]/error×7 类输出）惰性清洗
                     let mut segments = f.segments;
                     let before = segments.len();
-                    segments.retain(|s| !is_sound_marker(&s.text));
+                    segments.retain(|s| !is_sound_marker(&s.text) && !is_hallucination(&s.text));
                     let purged = before != segments.len();
                     if purged {
                         log::info!(
@@ -394,6 +441,30 @@ mod tests {
 
     fn seg(start: f64, end: f64, text: &str) -> Seg {
         Seg { start, end, text: text.to_string() }
+    }
+
+    #[test]
+    fn hallucinations_detected() {
+        // 段内重复词（用户实测：安静场景的 error ×7）
+        for s in [
+            "error error error error error error error.",
+            "error error error",
+            "我想 我想 我想 我想",
+        ] {
+            assert!(is_hallucination(s), "应判定为幻觉: {s}");
+        }
+        // 已知幻觉短语
+        assert!(is_hallucination("Thank you for watching."));
+        assert!(is_hallucination("字幕由 Amara.org 用户提供"));
+        // 同字符重复 ≥6
+        assert!(is_hallucination("哈哈哈哈哈哈"));
+        // 真实内容不能误伤
+        for s in [
+            "error", "error 出现了", "谢谢观看，我们下期再见", "哈哈哈哈",
+            "I think I'm going to be a part of myself.", "今天天气不错",
+        ] {
+            assert!(!is_hallucination(s), "不应误判为幻觉: {s}");
+        }
     }
 
     #[test]
