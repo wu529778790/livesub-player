@@ -9,12 +9,11 @@
       <button class="bar-btn" @click="settingsOpen = true; playlistOpen = false">设置</button>
     </header>
 
-    <!-- 设置抽屉：右侧滑出，点遮罩或 ✕ 关闭 -->
+    <!-- 设置弹窗：居中模态（✕/Esc/点遮罩关闭）——低频配置用完即走，不占侧边遮挡播放画面 -->
     <transition name="fade">
-      <div v-if="settingsOpen" class="drawer-mask" @click="settingsOpen = false" />
-    </transition>
-    <div class="drawer" :class="{ open: settingsOpen }">
-      <div class="drawer-head">
+      <div v-if="settingsOpen" class="modal-mask settings-mask" @click.self="settingsOpen = false">
+        <div class="modal settings-modal" role="dialog" aria-modal="true" aria-label="设置">
+      <div class="settings-head">
         <span>设置</span>
         <button class="drawer-close" title="关闭" @click="settingsOpen = false">✕</button>
       </div>
@@ -79,15 +78,11 @@
           </label>
           <label class="set-row">
             <span>档位</span>
-            <select :value="whisperModel" @change="changeWhisperModel">
-              <option value="base">快速 · 142MB（默认）</option>
-              <option value="small">均衡 · 466MB（更准）</option>
+            <!-- 未安装档也在列表中（未安装/下载中 x%）：选中即自动下载，完成后自动切换 -->
+            <select :value="pendingTierSwitch ?? whisperModel" @change="changeWhisperModel">
+              <option v-for="o in whisperTierOptions" :key="o.value" :value="o.value">{{ tierLabel(o) }}</option>
             </select>
           </label>
-          <p v-if="inactiveWhisperText" class="set-hint">
-            {{ inactiveWhisperText }}
-            <button class="link-btn" @click="removeModel(inactiveWhisperName)">{{ pendingDelete === inactiveWhisperName ? "确认删除" : "删除" }}</button>
-          </p>
         </div>
 
         <!-- 翻译卡：在线已就绪，本地按需安装 -->
@@ -98,10 +93,11 @@
           </div>
           <label class="set-row">
             <span>方式</span>
+            <!-- 仅本地模型未装也可选：选中即自动下载引擎+模型，装完自动可用（见 changeEngine） -->
             <select :value="engine" @change="changeEngine">
               <option value="auto">自动（优先在线，失败用本地）</option>
               <option value="online">仅在线翻译</option>
-              <option value="local">仅本地模型（离线）</option>
+              <option value="local">{{ mtLocalOptionLabel }}</option>
             </select>
           </label>
           <template v-if="engine !== 'online'">
@@ -120,7 +116,7 @@
               <button v-if="!mtLocalReady" class="btn small" :disabled="!!dl" @click="installLocalTranslation">
                 安装（约 {{ mtModel === "light" ? "1.1" : "4.4" }}GB）
               </button>
-              <button v-else class="btn small ghost" @click="removeModel(mtModelName)">
+              <button v-else class="btn small ghost" @click="releaseLocalMt">
                 {{ pendingDelete === mtModelName ? "确认释放" : "释放空间" }}
               </button>
             </div>
@@ -167,33 +163,36 @@
           <button class="link-btn" title="在浏览器打开仓库" @click="openUrl(GITHUB_URL)">wu529778790/livesub-player</button>
         </div>
       </template>
-    </div>
-
-    <!-- 播放列表抽屉：文件夹扫出的视频队列，点选换片；连播顺序即列表顺序 -->
-    <transition name="fade">
-      <div v-if="playlistOpen" class="drawer-mask" @click="playlistOpen = false" />
+        </div>
+      </div>
     </transition>
-    <div class="drawer" :class="{ open: playlistOpen }">
-      <div class="drawer-head">
+
+    <!-- 播放列表面板：PotPlayer 式右侧滑出、无遮罩，播放中可常开追片点播；随 UI 自动隐藏 -->
+    <transition name="fade">
+      <div v-if="playlistOpen" ref="plPanelRef" class="pl-panel">
+      <div class="pl-head">
         <span>播放列表{{ playlist.length ? `（${playlist.length}）` : "" }}</span>
         <button class="drawer-close" title="关闭" @click="playlistOpen = false">✕</button>
       </div>
       <button class="btn small ghost set-btn" @click="openFolder">打开文件夹…</button>
-      <template v-if="playlist.length">
-        <button
-          v-for="(p, i) in playlist"
-          :key="p"
-          class="pl-item"
-          :class="{ on: p === videoPath }"
-          :title="p"
-          @click="playFromPlaylist(p)"
-        >
-          <span class="pl-idx">{{ p === videoPath ? "▶" : i + 1 }}</span>
-          <span class="pl-name">{{ filenameOf(p) }}</span>
-        </button>
-      </template>
-      <p v-else class="set-hint">列表还是空的：打开一个文件夹，里面的视频会排进来；正在播的也会显示在这里。播完一条自动接下一条。</p>
-    </div>
+      <div class="pl-list">
+        <template v-if="playlist.length">
+          <button
+            v-for="(p, i) in playlist"
+            :key="p"
+            class="pl-item"
+            :class="{ on: p === videoPath }"
+            :title="p"
+            @click="playFromPlaylist(p)"
+          >
+            <span class="pl-idx">{{ p === videoPath ? "▶" : i + 1 }}</span>
+            <span class="pl-name">{{ filenameOf(p) }}</span>
+          </button>
+        </template>
+        <p v-else class="set-hint">列表还是空的：打开一个文件夹，里面的视频会排进来；正在播的也会显示在这里。播完一条自动接下一条。</p>
+      </div>
+      </div>
+    </transition>
 
     <!-- 视频区域：播放中背景全透明，透出下层 mpv 画面；未加载时整窗不透明（见 .shell.is-empty）；输入由前端接管 -->
     <main
@@ -243,7 +242,7 @@
             <path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
           </svg>
           <span class="dz-main">把视频文件拖到这里，或点击选择</span>
-          <span class="dz-sub">支持 MP4、MKV、MOV、WebM 等常见格式；拖入文件夹 = 整个文件夹排成播放列表</span>
+          <span class="dz-sub">支持 MP4、MKV、MOV、WebM 等常见格式<br />拖入文件夹 = 整个文件夹排成播放列表</span>
         </button>
 
         <!-- 最近播放：点击直接续播（进度存本机；文件已删除的条目不显示） -->
@@ -267,32 +266,10 @@
           </button>
         </div>
 
-        <template v-if="showWizard">
-          <div class="wizard-card">
-            <p class="wizard-title">字幕引擎后台准备中</p>
-            <p class="wizard-text">
-              正在自动下载识别模型（约 142MB，仅此一次）。<br />
-              下载完成后拖入视频即可看到字幕；翻译默认走在线，无需等待。
-            </p>
-            <div class="wizard-actions">
-              <button class="btn ghost" @click.stop="showWizard = false">知道了</button>
-            </div>
-          </div>
-        </template>
-
-        <!-- ffmpeg 缺失：识别字幕的硬前提，必须显式引导（播放功能不依赖它） -->
-        <template v-if="!ffmpegOk">
-          <div class="wizard-card">
-            <p class="wizard-title">还差一步：安装 ffmpeg</p>
-            <p class="wizard-text">
-              字幕识别依赖 ffmpeg（播放不依赖）。在终端执行下面的命令后重启本应用：<br />
-              <code>brew install ffmpeg</code>
-            </p>
-            <div class="wizard-actions">
-              <button class="btn" @click.stop="copyFfmpegHint">复制安装命令</button>
-            </div>
-          </div>
-        </template>
+        <!-- ffmpeg 缺失：识别字幕的硬前提，欢迎页常驻一行引导（详情见弹窗，可随时重开） -->
+        <button v-if="!ffmpegOk" class="ffmpeg-hint" @click="showFfmpegModal = true">
+          检测到缺少 ffmpeg，字幕识别不可用 · 点此查看安装方法
+        </button>
 
         <p v-if="status" class="status">{{ status }}</p>
       </div>
@@ -317,7 +294,11 @@
           </template>
         </div>
       </transition>
-      <div v-if="asrError" class="asr-error">{{ asrError }}</div>
+      <div v-if="asrError" class="asr-error">
+        <span>{{ asrError }}</span>
+        <button v-if="asrError.includes('未找到识别模型')" class="link-btn" @click.stop="settingsOpen = true; playlistOpen = false">打开设置</button>
+        <button class="err-close asr-err-close" title="关闭" @click.stop="asrError = ''">✕</button>
+      </div>
 
       <!-- 全片字幕导出进度（异步识别整个视频，可取消） -->
       <div v-if="exporting !== null" class="asr-progress export-pill">
@@ -325,15 +306,19 @@
         <button class="btn small ghost" @click.stop="cancelExport">取消</button>
       </div>
 
-      <!-- 通知区：下载进度 / 错误条 / 兜底引导 / 新版本，纵向堆叠避免互相遮挡 -->
+      <!-- 通知区：右下角悬浮堆叠（下载进度/错误/引导/新版本），不遮挡居中内容 -->
       <div class="notices">
         <!-- 下载进度卡：全局可见（不必停在设置页），支持暂停/继续/取消 -->
         <div v-if="dl" class="dl-bar">
-          <span class="dl-text">{{ dlNameText }} {{ dl.pct }}% · {{ dl.mb.toFixed(0) }}/{{ dl.total.toFixed(0) }}MB<template v-if="dl.state === 'downloading' && dlSpeedText"> · {{ dlSpeedText }}<template v-if="dlEtaText"> · 剩余 {{ dlEtaText }}</template></template></span>
-          <span class="dl-actions">
-            <button class="btn small ghost" @click.stop="dl.state === 'paused' ? resumeDownload() : pauseDownload()">{{ dl.state === "paused" ? "继续" : "暂停" }}</button>
-            <button class="btn small ghost" @click.stop="cancelDownload">取消</button>
-          </span>
+          <div class="dl-top">
+            <span class="dl-text">{{ dlNameText }} {{ dl.pct }}%<template v-if="dl.state === 'paused'"> · 已暂停</template></span>
+            <span class="dl-actions">
+              <button class="btn small ghost" @click.stop="dl.state === 'paused' ? resumeDownload() : pauseDownload()">{{ dl.state === "paused" ? "继续" : "暂停" }}</button>
+              <button class="btn small ghost" @click.stop="cancelDownload">取消</button>
+            </span>
+          </div>
+          <div class="dl-track"><i :style="{ width: dl.pct + '%' }" /></div>
+          <span class="dl-detail">{{ dl.mb.toFixed(0) }}/{{ dl.total.toFixed(0) }}MB<template v-if="dl.state === 'downloading' && dlSpeedText"> · {{ dlSpeedText }}<template v-if="dlEtaText"> · 剩余 {{ dlEtaText }}</template></template></span>
         </div>
 
         <div v-if="errorBar" class="err-bar">
@@ -469,11 +454,41 @@
         >{{ fmtSpeed(s) }}</button>
       </div>
     </div>
+
+    <!-- 首启弹窗：一次性告知，遮罩/按钮/Esc 均可关闭。
+         ffmpeg 缺失优先展示（硬前提、需用户行动），模型下载进度由右下角悬浮卡承载 -->
+    <transition name="fade">
+      <div v-if="showFfmpegModal" class="modal-mask" @click.self="showFfmpegModal = false">
+        <div class="modal" role="dialog" aria-modal="true" aria-label="安装 ffmpeg">
+          <p class="modal-title">还差一步：安装 ffmpeg</p>
+          <p class="modal-text">字幕识别依赖 ffmpeg（播放不依赖）。<br />在终端执行下面的命令后重启本应用：</p>
+          <code class="modal-code">brew install ffmpeg</code>
+          <div class="modal-actions">
+            <button class="btn" @click="copyFfmpegHint">复制安装命令</button>
+            <button class="btn ghost" @click="showFfmpegModal = false">知道了</button>
+          </div>
+        </div>
+      </div>
+    </transition>
+    <transition name="fade">
+      <div v-if="showWizard" class="modal-mask" @click.self="showWizard = false">
+        <div class="modal" role="dialog" aria-modal="true" aria-label="字幕引擎准备中">
+          <p class="modal-title">字幕引擎后台准备中</p>
+          <p class="modal-text">
+            正在自动下载识别模型（约 142MB，仅此一次），进度见右下角。<br />
+            下载完成后拖入视频即可看到字幕；翻译默认走在线，无需等待。
+          </p>
+          <div class="modal-actions">
+            <button class="btn ghost" @click="showWizard = false">知道了</button>
+          </div>
+        </div>
+      </div>
+    </transition>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { error as logError, info as logInfo } from "@tauri-apps/plugin-log";
 import { getVersion } from "@tauri-apps/api/app";
@@ -576,7 +591,8 @@ interface ModelStatus {
 const modelStatus = ref<ModelStatus[]>([]);
 const whisperModel = ref("base"); // 识别档位：快速（默认）/均衡
 const mtModel = ref("light"); // 本地翻译档位：轻量 1.8B（默认）/高质量 7B
-const showWizard = ref(false); // 首启识别模型后台下载提示卡（可关）
+const showWizard = ref(false); // 首启识别模型后台下载弹窗（可关）
+const showFfmpegModal = ref(false); // ffmpeg 缺失弹窗（欢迎页可随时重开）
 
 // 下载进度卡（全局唯一下载位；速度/剩余时间由前端按进度事件时间差计算）
 const dl = ref<{
@@ -647,11 +663,24 @@ const whisperStateText = computed(() => {
   if (dl.value?.name.startsWith("whisper")) return `后台准备中 ${dl.value.pct}%`;
   return "未就绪";
 });
-const inactiveWhisperName = computed(() => (whisperModel.value === "small" ? "whisper-base" : "whisper-small"));
-const inactiveWhisperText = computed(() => {
-  const m = modelStatus.value.find((x) => x.name === inactiveWhisperName.value);
-  return m?.installed ? `未使用的档位（${m.sizeMb}MB）可删除释放空间` : "";
-});
+// 档位选项带安装状态：未安装档也在列表中（标注未安装/下载中），选中即自动下载，完成后自动切换
+const whisperTierOptions = computed(() =>
+  (
+    [
+      { value: "base", label: "快速 · 142MB（默认）" },
+      { value: "small", label: "均衡 · 466MB（更准）" },
+    ] as const
+  ).map((o) => ({
+    ...o,
+    installed: modelStatus.value.find((m) => m.name === `whisper-${o.value}`)?.installed ?? false,
+  }))
+);
+// 下拉项文案：未安装的档让用户知道现状，正在下的显示进度
+function tierLabel(o: { value: string; label: string; installed: boolean }) {
+  if (o.installed) return o.label;
+  if (pendingTierSwitch.value === o.value && dl.value) return `${o.label}（下载中 ${dl.value.pct}%）`;
+  return `${o.label}（未安装）`;
+}
 const mtModelName = computed(() => (mtModel.value === "light" ? "translation-light" : "translation"));
 const mtModelInstalled = computed(
   () => modelStatus.value.find((m) => m.name === mtModelName.value)?.installed ?? false
@@ -660,12 +689,32 @@ const mtEngineInstalled = computed(
   () => modelStatus.value.find((m) => m.name === "translation-engine")?.installed ?? false
 );
 const mtLocalReady = computed(() => mtModelInstalled.value && mtEngineInstalled.value);
+// 本地翻译是否在准备中（引擎/模型下载中或队列待下）
+const mtDownloading = computed(
+  () =>
+    (dl.value?.name.startsWith("translation") ?? false) ||
+    downloadQueue.value.some((n) => n.startsWith("translation"))
+);
 const mtLocalStateText = computed(() => {
+  if (mtDownloading.value) return dl.value ? `后台准备中 ${dl.value.pct}%` : "后台准备中";
   if (!mtEngineInstalled.value) return "未安装（含推理引擎）";
   if (!mtModelInstalled.value) return "未安装";
   return mtModel.value === "high" ? "已就绪 · 高质量" : "已就绪 · 轻量";
 });
+// 方式下拉里「仅本地」的动态标注：未安装/下载中都让用户看得见进度
+const mtLocalOptionLabel = computed(() => {
+  if (mtLocalReady.value) return "仅本地模型（离线）";
+  if (mtDownloading.value)
+    return dl.value ? `仅本地模型（离线）（下载中 ${dl.value.pct}%）` : "仅本地模型（离线）（准备中）";
+  return "仅本地模型（离线）（未安装）";
+});
 const dlNameText = computed(() => (dl.value ? modelNameText(dl.value.name) : ""));
+// 识别模型是否正在后台准备（下载中/暂停可续/队列待下）：决定「未找到识别模型」错误是否降级隐藏
+const whisperDownloading = computed(
+  () =>
+    (dl.value?.name.startsWith("whisper") ?? false) ||
+    downloadQueue.value.some((n) => n.startsWith("whisper"))
+);
 const dlSpeedText = computed(() =>
   dl.value && dl.value.speedMb > 0.05 ? `${dl.value.speedMb.toFixed(1)}MB/s` : ""
 );
@@ -776,6 +825,8 @@ onMounted(async () => {
   window.addEventListener("keydown", onKey);
   // asr 事件
   await listen<Sub>("asr://subtitle", (e) => {
+    // 有字幕产出 = 识别管线实际在工作，之前的模型类错误已过时（画面内不挂自相矛盾的状态）
+    asrError.value = "";
     insertSub(e.payload);
   });
   await listen<{ start: number; end: number }>("asr://progress", (e) => {
@@ -785,7 +836,11 @@ onMounted(async () => {
     asrProgressTimer = window.setTimeout(() => (asrProgressLive.value = false), 5000);
   });
   await listen<string>("asr://error", (e) => {
-    asrError.value = String(e.payload);
+    const msg = String(e.payload);
+    // 模型缺失但识别模型正在后台下载：右下角进度卡已在讲述这个状态，
+    // 不再挂红色错误条（下载完成识别自动恢复，字幕照常出现）
+    if (msg.includes("未找到识别模型") && whisperDownloading.value) return;
+    asrError.value = msg;
   });
   // 后台补全跑完：全片字幕已就绪（之后 seek 任意位置都有字幕）
   await listen<string>("asr://complete", () => {
@@ -899,17 +954,20 @@ onMounted(async () => {
       dl.value = null;
       lastProg = null;
       downloadQueue.value = [];
+      pendingTierSwitch.value = null; // 下载取消：挂起的「完成后自动切档」意图一并作废
     }
   });
   await listen<{ name: string }>("models://done", async (e) => {
     dl.value = null;
     lastProg = null;
     needLocalModel.value = false;
+    // 识别模型就位：「未找到识别模型」的前提已消失，过时错误立即撤下
+    if (e.payload.name.startsWith("whisper")) asrError.value = "";
     await refreshModelStatus();
     // 档位切换等待下载完成：模型就位后自动应用
-    if (pendingTierSwitch && e.payload.name === pendingTierSwitch) {
-      const tier = pendingTierSwitch;
-      pendingTierSwitch = null;
+    if (pendingTierSwitch.value && e.payload.name === pendingTierSwitch.value) {
+      const tier = pendingTierSwitch.value;
+      pendingTierSwitch.value = null;
       await applyTier(tier);
     }
     // 识别模型首次就绪：后台无感下载完成，告知用户核心功能可用
@@ -928,6 +986,7 @@ onMounted(async () => {
     dl.value = null;
     lastProg = null;
     downloadQueue.value = [];
+    pendingTierSwitch.value = null; // 下载失败：挂起的「完成后自动切档」意图一并作废
     showError(`模型下载失败: ${e.payload}`);
   });
   engine.value = await invoke<string>("cmd_mt_get_engine");
@@ -944,13 +1003,18 @@ onMounted(async () => {
   autoUpdate.value = ((await invoke<string>("cmd_get_setting", { key: "auto_update" })) ?? "1") !== "0";
   appVersion.value = await getVersion().catch(() => "");
   ffmpegOk.value = await invoke<boolean>("cmd_check_ffmpeg").catch(() => true);
+  // ffmpeg 缺失：识别字幕的硬前提，启动即弹窗引导（模型准备弹窗让位，进度由右下角悬浮卡承载）
+  if (!ffmpegOk.value) showFfmpegModal.value = true;
   void applyPersistedPlayer();
   await refreshModelStatus();
-  // 识别模型未装：后台自动下载快速档（不阻塞使用；就绪后 toast + 提示卡）
+  // 悖论态自愈：历史设置可能指向未安装的档位/方式（下载被取消或删除后遗留），
+  // 不纠正会出现「状态未就绪但字幕照出」或「选了本地却无本地可用」的歧义
+  await coerceUnavailablePicks();
+  // 识别模型未装：后台自动下载快速档（不阻塞使用；就绪后 toast + 提示弹窗）
   recognitionWasReady = modelStatus.value.some((m) => m.name.startsWith("whisper") && m.installed);
   if (!recognitionWasReady) {
     enqueueDownload(["whisper-base"]);
-    showWizard.value = true;
+    if (ffmpegOk.value) showWizard.value = true;
   }
   // 新版本检查（设置可关；静默失败即可）
   if (autoUpdate.value) {
@@ -1080,20 +1144,25 @@ async function removeModel(name: string) {
   showToast(`${modelNameText(name)}已删除`);
 }
 
-// 档位切换若指向未下载的模型：先排队下载，完成后在 models://done 里自动切换
-let pendingTierSwitch: string | null = null;
+// 档位选中未下载的模型：立即挂起意图并排队下载，完成后在 models://done 里自动切换；
+// 下载期间后端继续用当前已装档位（切档命令等装完才下发），看片不中断
+const pendingTierSwitch = ref<string | null>(null);
 
 async function changeWhisperModel(e: Event) {
   const v = (e.target as HTMLSelectElement).value;
-  if (v === whisperModel.value) return;
-  const installed =
-    modelStatus.value.find((m) => m.name === (v === "small" ? "whisper-small" : "whisper-base"))
-      ?.installed ?? false;
-  if (!installed) {
-    pendingTierSwitch = v;
+  if (v === (pendingTierSwitch.value ?? whisperModel.value)) return;
+  const opt = whisperTierOptions.value.find((o) => o.value === v);
+  if (opt && !opt.installed) {
+    pendingTierSwitch.value = v;
     showToast(`正在下载${v === "small" ? "均衡（466MB）" : "快速（142MB）"}档，完成后自动切换`);
     enqueueDownload([v === "small" ? "whisper-small" : "whisper-base"]);
     return;
+  }
+  // 切回已装档：作废挂起的下载意图（从队列移除；正在下的让它下完，完成后不再切换）
+  if (pendingTierSwitch.value) {
+    const t = pendingTierSwitch.value;
+    pendingTierSwitch.value = null;
+    downloadQueue.value = downloadQueue.value.filter((n) => n !== `whisper-${t}`);
   }
   await applyTier(v);
 }
@@ -1133,18 +1202,63 @@ function installLocalTranslation() {
 
 async function changeMtModel(e: Event) {
   const v = (e.target as HTMLSelectElement).value;
+  if (v === mtModel.value) return;
   mtModel.value = v;
   await invoke("cmd_set_setting", { key: "mt_model", value: v }).catch((e) =>
     showError(String(e))
   );
+  // 仅本地模式下换到未装档位：下载它，装完即用（方式保持 local，不降级）
+  if (!mtModelInstalled.value && engine.value === "local") {
+    installLocalTranslation();
+    showToast("正在下载该档位，完成后自动启用");
+    return;
+  }
   if (mtModelInstalled.value) showToast("本地翻译档位已切换，立即生效");
+}
+
+// 释放本地翻译模型：若方式正挂在「仅本地」上，先落回自动，否则删完就没有可用方式了
+async function releaseLocalMt() {
+  if (engine.value === "local") {
+    engine.value = "auto";
+    await invoke("cmd_mt_set_engine", { engine: "auto" }).catch(() => {});
+    showToast("已切回自动翻译，再释放空间");
+  }
+  await removeModel(mtModelName.value);
 }
 
 async function changeEngine(e: Event) {
   const v = (e.target as HTMLSelectElement).value;
+  if (v === engine.value) return;
   engine.value = v;
   await invoke("cmd_mt_set_engine", { engine: v }).catch((e) => showError(String(e)));
-  if (v === "local") showToast("已切换为仅本地翻译：需装好引擎与模型");
+  if (v === "local" && !mtLocalReady.value) {
+    // 选中本地但还没装：一个动作把引擎+模型串行装完，装完自动可用
+    installLocalTranslation();
+    showToast("正在下载本地翻译，完成后自动启用");
+  } else if (v === "local") {
+    showToast("已切换为仅本地翻译");
+  }
+}
+
+// 启动自愈：设置里记录的意图（档位/本地翻译）尚未装好时，恢复下载而不是降级放弃；
+// 识别先落在已装档位保证能播，意图档位装完自动切换过去
+async function coerceUnavailablePicks() {
+  const tierInstalled = modelStatus.value.some(
+    (m) => m.name === `whisper-${whisperModel.value}` && m.installed
+  );
+  const installedTier = modelStatus.value.find((m) => m.name.startsWith("whisper") && m.installed);
+  if (!tierInstalled && installedTier) {
+    const fallbackTier = installedTier.name.replace("whisper-", "");
+    pendingTierSwitch.value = whisperModel.value;
+    enqueueDownload([`whisper-${whisperModel.value}`]);
+    showToast(`正在继续下载${whisperModel.value === "small" ? "均衡" : "快速"}档，完成后自动切换`);
+    await invoke("cmd_asr_set_model", { tier: fallbackTier }).catch(() => {});
+    whisperModel.value = fallbackTier;
+  }
+  if (engine.value === "local" && !mtLocalReady.value) {
+    installLocalTranslation();
+    showToast("本地翻译未装完，正在继续下载");
+  }
 }
 
 // 字幕模式统一入口：右键菜单 / 快捷键 / 设置页都走这里，保证落盘一致
@@ -1399,15 +1513,14 @@ function openCtx(e: MouseEvent) {
   ctxOpen.value = true;
 }
 
-// ---- 播放中鼠标静止 2.5s 隐藏顶栏/控制栏，动一下即恢复 ----
+// ---- 播放中鼠标静止 2.5s 隐藏顶栏/控制栏/列表面板，动一下即恢复 ----
 function onUiActivity() {
   idle.value = false;
   window.clearTimeout(idleTimer);
   idleTimer = window.setTimeout(() => {
     if (
       loaded.value && !paused.value && !dragging.value &&
-      !settingsOpen.value && !speedPopOpen.value && !ctxOpen.value &&
-      !playlistOpen.value
+      !settingsOpen.value && !speedPopOpen.value && !ctxOpen.value
     ) {
       idle.value = true;
     }
@@ -1416,8 +1529,7 @@ function onUiActivity() {
 const uiHidden = computed(
   () =>
     idle.value && loaded.value && !paused.value && !dragging.value &&
-    !settingsOpen.value && !speedPopOpen.value && !ctxOpen.value &&
-    !playlistOpen.value
+    !settingsOpen.value && !speedPopOpen.value && !ctxOpen.value
 );
 
 // ---- 进度条拖动 + 悬停预览 ----
@@ -1458,6 +1570,14 @@ async function openFile() {
 // ---- 播放列表（文件夹批量）----
 const playlist = ref<string[]>([]);
 const playlistOpen = ref(false);
+const plPanelRef = ref<HTMLElement>();
+
+// 面板打开时把当前播放项滚到可视区中间（长列表里直接看到播到哪了）
+watch(playlistOpen, async (open) => {
+  if (!open) return;
+  await nextTick();
+  plPanelRef.value?.querySelector(".pl-item.on")?.scrollIntoView({ block: "center" });
+});
 
 function filenameOf(p: string): string {
   return p.split("/").pop() || p;
@@ -1482,7 +1602,7 @@ async function openFolder() {
 }
 
 function playFromPlaylist(p: string) {
-  playlistOpen.value = false;
+  // 面板不收起：连播场景下看完一条直接点下一条，无需重新打开
   if (p === videoPath.value) return; // 正在播的就是它
   void loadVideo(p);
 }
@@ -1588,6 +1708,16 @@ function onKey(e: KeyboardEvent) {
   if (settingsOpen.value) {
     if (e.key === "Escape") settingsOpen.value = false;
     return; // 设置开着时不响应播放快捷键（1/2/3、空格会误触）
+  }
+  // 列表面板无遮罩、不拦截播放快捷键（看片时可常开）；仅 Esc 可关
+  if (e.key === "Escape" && playlistOpen.value) playlistOpen.value = false;
+  // 弹窗开着时：Esc 关闭，其余按键不透传给播放器
+  if (showFfmpegModal.value || showWizard.value) {
+    if (e.key === "Escape") {
+      showFfmpegModal.value = false;
+      showWizard.value = false;
+    }
+    return;
   }
   if (!loaded.value) return;
   switch (e.key) {
@@ -1983,39 +2113,80 @@ onMounted(async () => {
   white-space: nowrap;
 }
 
-/* 首启向导卡片 */
-.wizard-card {
-  width: min(520px, 84%);
+/* ---- 首启弹窗：遮罩 + 居中卡片（遮罩/按钮/Esc 均可关；层级在设置抽屉之上、右键菜单之下） ---- */
+.modal-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 33;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(8, 7, 12, 0.6);
+  backdrop-filter: blur(4px);
+}
+
+.modal {
+  width: min(400px, 92%);
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 10px;
-  padding: 18px 24px;
-  border-radius: 14px;
-  background: rgba(255, 212, 121, 0.05);
+  gap: 14px;
+  padding: 28px 28px 24px;
+  border-radius: 16px;
+  background: #1b1723;
   border: 1px solid rgba(255, 212, 121, 0.28);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6);
+  text-align: center;
 }
 
-.wizard-title {
+.modal-title {
   margin: 0;
-  font-size: 14px;
+  font-size: 17px;
   font-weight: 700;
   color: #ffd479;
 }
 
-.wizard-text {
+.modal-text {
   margin: 0;
+  font-size: 13px;
   line-height: 1.8;
-  font-size: 12px;
-  color: #b9b9c4;
+  color: #c9c9d4;
 }
 
-.wizard-text code {
-  background: rgba(255, 255, 255, 0.12);
-  padding: 1px 6px;
-  border-radius: 4px;
-  color: #ffe1a1;
+.modal-code {
+  padding: 8px 18px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 13px;
+  color: #ffe1a1;
+  user-select: all;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+/* ffmpeg 引导：欢迎页常驻一行入口（弹窗关掉后仍可重开） */
+.ffmpeg-hint {
+  background: none;
+  border: none;
+  padding: 2px 4px;
+  font: inherit;
+  font-size: 12px;
+  color: #f2b544;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-color: rgba(242, 181, 68, 0.4);
+}
+
+.ffmpeg-hint:hover {
+  color: #ffd479;
 }
 
 .btn {
@@ -2129,6 +2300,9 @@ onMounted(async () => {
   position: absolute;
   top: 14px;
   left: 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
   padding: 6px 12px;
   border-radius: 8px;
   background: rgba(120, 30, 30, 0.8);
@@ -2138,12 +2312,9 @@ onMounted(async () => {
   pointer-events: none;
 }
 
-/* 设置抽屉 */
-.drawer-mask {
-  position: fixed;
-  inset: 0;
-  z-index: 30;
-  background: rgba(0, 0, 0, 0.35);
+/* 容器穿透点击（点视频暂停不受影响），只有按钮可交互 */
+.asr-err-close {
+  pointer-events: auto;
 }
 
 .fade-enter-active,
@@ -2156,33 +2327,69 @@ onMounted(async () => {
   opacity: 0;
 }
 
-.drawer {
-  position: fixed;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  width: 320px;
-  z-index: 31;
-  padding: 16px 18px;
-  background: rgba(22, 22, 28, 0.97);
-  border-left: 1px solid rgba(255, 255, 255, 0.12);
-  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.45);
-  transform: translateX(105%);
-  transition: transform 0.22s ease;
+/* 设置弹窗：顶部锚定——切 tab 只改高度不跳位（首启小弹窗仍垂直居中） */
+.settings-mask {
+  align-items: flex-start;
+  padding-top: 10vh;
+}
+
+/* 设置弹窗：复用 .modal 外壳，内容左对齐、超高可滚动 */
+.settings-modal {
+  width: min(620px, 94%);
+  max-height: 84vh;
   overflow-y: auto;
+  align-items: stretch;
+  text-align: left;
+  gap: 12px;
+  padding: 20px 24px;
 }
 
-.drawer.open {
-  transform: translateX(0);
-}
-
-.drawer-head {
+.settings-head {
   display: flex;
   justify-content: space-between;
   align-items: center;
   font-size: 15px;
   font-weight: 700;
-  margin-bottom: 10px;
+}
+
+/* 播放列表面板：右侧滑出、无遮罩，播放中可常开（PotPlayer 式）；随 UI 自动隐藏 */
+.pl-panel {
+  position: fixed;
+  top: 40px;
+  right: 0;
+  bottom: 0;
+  width: 300px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 14px 16px;
+  background: rgba(22, 22, 28, 0.92);
+  border-left: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(10px);
+  transition: transform 0.25s ease, opacity 0.2s;
+}
+
+.pl-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.pl-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ui-hidden .pl-panel {
+  transform: translateX(100%);
 }
 
 .drawer-close {
@@ -2356,10 +2563,12 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  /* 标题块与内容行拉开一档（大于行间距 10px），没有描述行的卡片也有层级 */
+  margin-bottom: 12px;
 }
 
 .cap-title {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
   color: #fff;
 }
@@ -2374,27 +2583,39 @@ onMounted(async () => {
 }
 
 .cap-desc {
-  margin: 6px 0 4px;
+  margin: -6px 0 8px; /* 描述紧跟标题（收回标题下的一部分间距），与内容行保持一档 */
   font-size: 11px;
   color: #8f8f9a;
 }
 
-/* ---- 下载进度条（通知区，全局可见） ---- */
+/* ---- 下载进度卡（右下角通知堆叠内）：名称+百分比+操作一行，下方细进度条与明细 ---- */
 .dl-bar {
+  width: 300px;
   display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 10px 14px;
-  border-radius: 10px;
-  background: rgba(242, 181, 68, 0.12);
-  border: 1px solid rgba(242, 181, 68, 0.25);
+  flex-direction: column;
+  gap: 7px;
+  padding: 11px 14px 12px;
+  border-radius: 12px;
+  background: rgba(22, 18, 28, 0.92);
+  border: 1px solid rgba(242, 181, 68, 0.35);
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(12px);
   font-size: 12px;
   color: #f2e9d8;
+}
+
+.dl-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .dl-text {
   flex: 1;
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
 
@@ -2402,6 +2623,27 @@ onMounted(async () => {
   display: flex;
   gap: 6px;
   flex-shrink: 0;
+}
+
+.dl-track {
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+
+.dl-track i {
+  display: block;
+  height: 100%;
+  background: #f2b544;
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+.dl-detail {
+  font-size: 11px;
+  color: #8f8f9a;
+  font-variant-numeric: tabular-nums;
 }
 
 .model-desc {
@@ -2414,27 +2656,23 @@ onMounted(async () => {
   white-space: nowrap;
 }
 
-/* 首启向导按钮组 */
-.wizard-actions {
+/* 通知区：右下角悬浮纵向堆叠（下载进度/错误/引导/更新），不遮挡欢迎页与播放画面；
+   播放中悬浮于控制栏上方，欢迎页贴角；层级高于设置弹窗（错误/进度在弹窗打开时也要可见） */
+.notices {
+  position: fixed;
+  right: 16px;
+  bottom: 76px;
   display: flex;
-  flex-direction: column;
-  gap: 10px;
-  width: 100%;
+  flex-direction: column-reverse;
+  align-items: flex-end;
+  gap: 8px;
+  z-index: 34;
+  pointer-events: none;
+  max-width: min(420px, 86vw);
 }
 
-/* 通知区：错误条/引导条/更新条纵向堆叠，避免同位互相遮挡 */
-.notices {
-  position: absolute;
-  top: 50px;
-  left: 50%;
-  transform: translateX(-50%);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  z-index: 15;
-  pointer-events: none;
-  max-width: 86%;
+.shell.is-empty .notices {
+  bottom: 16px;
 }
 
 .notices > div {
@@ -2478,7 +2716,6 @@ onMounted(async () => {
   border: 1px solid rgba(255, 212, 121, 0.4);
   font-size: 12px;
   color: #ffe1a1;
-  max-width: 72%;
 }
 
 /* 新版本提示条 */
@@ -2619,7 +2856,7 @@ onMounted(async () => {
   color: #fff;
   font-size: 13px;
   pointer-events: none;
-  z-index: 10;
+  z-index: 50; /* 操作反馈永远在最上层（设置弹窗之上，见 .modal-mask） */
 }
 
 /* 倍速按钮 + 弹层 */
