@@ -93,7 +93,9 @@ fn spec(name: &str) -> Option<ModelSpec> {
             desc: "语音识别·均衡档（~466MB，更准）",
             member: None,
         }),
-        // 引擎按平台下载预编译二进制（llama.cpp release，包内扁平：主程序 + 依赖库）
+        // 引擎按平台下载预编译二进制（llama.cpp release，包内扁平：主程序 + 依赖库）；
+        // linux 播放器仍是 stub，不列引擎
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         "translation-engine" => Some(ModelSpec {
             sources: vec![LLAMA_CPP_RELEASE.to_string()],
             dest: if cfg!(target_os = "windows") { "llama-server.zip" } else { "llama-server.tar.gz" },

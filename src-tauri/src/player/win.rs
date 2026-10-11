@@ -587,3 +587,50 @@ unsafe fn set_prop(session: &Session, name: &str, value: &str) -> Result<(), Str
     }
     Ok(())
 }
+
+// ---------- tauri 命令（与 mac.rs 同名同参，前端零感知） ----------
+
+#[tauri::command]
+pub fn cmd_player_load(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    player_load(&app, path)
+}
+
+#[tauri::command]
+pub fn cmd_player_toggle_pause(app: tauri::AppHandle) -> Result<bool, String> {
+    player_toggle_pause(&app)
+}
+
+#[tauri::command]
+pub fn cmd_player_seek(app: tauri::AppHandle, target: f64, absolute: bool) -> Result<(), String> {
+    player_seek(&app, target, absolute)
+}
+
+#[tauri::command]
+pub fn cmd_player_stop(app: tauri::AppHandle) -> Result<(), String> {
+    player_stop(&app)
+}
+
+#[tauri::command]
+pub fn cmd_player_set_volume(app: tauri::AppHandle, volume: f64) -> Result<(), String> {
+    player_set_volume(&app, volume)
+}
+
+#[tauri::command]
+pub fn cmd_player_set_speed(app: tauri::AppHandle, speed: f64) -> Result<(), String> {
+    player_set_speed(&app, speed)
+}
+
+#[tauri::command]
+pub fn cmd_player_get_state(app: tauri::AppHandle) -> Result<PlayerEvent, String> {
+    player_get_state(&app)
+}
+
+#[tauri::command]
+pub fn cmd_player_screenshot(app: tauri::AppHandle) -> Result<String, String> {
+    player_screenshot(&app)
+}
+
+#[tauri::command]
+pub fn cmd_player_toggle_fullscreen(app: tauri::AppHandle) -> Result<bool, String> {
+    player_toggle_fullscreen(&app)
+}
