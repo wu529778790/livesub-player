@@ -467,9 +467,16 @@ fn emit_translation(app: &AppHandle, job: &TransJob, dst: &str) {
 }
 
 // ---------- llama-server sidecar ----------
+/// 翻译模型查找：按设置档位（light=轻量 1.8B，默认；high=高质量 7B），
+/// 所选档位未装时回落到任一已装档——不因切换档位而不可用
 fn find_model() -> Option<PathBuf> {
     let dir = crate::settings::data_dir().join("models");
-    for name in ["translation.gguf", "translation-tiny.gguf"] {
+    let tier = crate::settings::read("mt_model").unwrap_or_else(|| "light".into());
+    let (first, second) = match tier.as_str() {
+        "high" => ("translation.gguf", "hunyuan-mt-light.gguf"),
+        _ => ("hunyuan-mt-light.gguf", "translation.gguf"),
+    };
+    for name in [first, second, "translation-tiny.gguf"] {
         let p = dir.join(name);
         if p.is_file() {
             return Some(p);

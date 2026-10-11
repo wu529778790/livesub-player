@@ -58,53 +58,75 @@
         <p class="set-hint">播放中也可随时用右键菜单或 1 / 2 / 3 切换字幕模式。</p>
       </template>
 
-      <!-- 识别与翻译 -->
+      <!-- 识别与翻译：两张能力卡（识别 / 翻译），模型细节收进卡内 -->
       <template v-if="setTab === 'ai'">
-        <label class="set-row">
-          <span>识别语言</span>
-          <select :value="asrLang" @change="changeAsrLang">
-            <option value="auto">自动检测（推荐）</option>
-            <option value="zh">中文</option>
-            <option value="en">英语</option>
-            <option value="ja">日语</option>
-            <option value="ko">韩语</option>
-          </select>
-        </label>
-        <p class="set-hint">看已知语种的片时固定语言，识别更快更准；选自动则跟随内容切换。</p>
-        <label class="set-row">
-          <span>识别档位</span>
-          <select :value="whisperModel" @change="changeWhisperModel">
-            <option value="small">均衡（默认，推荐）</option>
-            <option value="base">快速（电脑配置较低时）</option>
-          </select>
-        </label>
-        <label class="set-row">
-          <span>翻译引擎</span>
-          <select :value="engine" @change="changeEngine">
-            <option value="auto">自动（优先在线，失败用本地）</option>
-            <option value="online">仅在线翻译</option>
-            <option value="local">仅本地模型（离线）</option>
-          </select>
-        </label>
-
-        <div class="drawer-section">模型管理</div>
-        <div v-for="m in modelStatus" :key="m.name" class="model-row">
-          <span class="model-desc">{{ m.desc }}</span>
-          <span v-if="m.installed" class="model-ok">已装 {{ m.sizeMb }}MB</span>
-          <template v-else>
-            <button class="btn small" :disabled="downloadingName === m.name" @click="download(m.name)">
-              {{ downloadingName === m.name ? `下载中 ${downloadPct}%` : "下载" }}
-            </button>
-          </template>
-          <button
-            v-if="m.installed"
-            class="btn small ghost"
-            @click="removeModel(m.name)"
-          >{{ pendingDelete === m.name ? "确认删除" : "删除" }}</button>
+        <!-- 识别卡：字幕功能的前提 -->
+        <div class="cap-card">
+          <div class="cap-head">
+            <span class="cap-title">语音识别</span>
+            <span class="cap-state" :class="{ ok: recognitionReady }">{{ whisperStateText }}</span>
+          </div>
+          <p class="cap-desc">根据音频实时生成字幕，本地运行、内容不上传。</p>
+          <label class="set-row">
+            <span>识别语言</span>
+            <select :value="asrLang" @change="changeAsrLang">
+              <option value="auto">自动检测（推荐）</option>
+              <option value="zh">中文</option>
+              <option value="en">英语</option>
+              <option value="ja">日语</option>
+              <option value="ko">韩语</option>
+            </select>
+          </label>
+          <label class="set-row">
+            <span>档位</span>
+            <select :value="whisperModel" @change="changeWhisperModel">
+              <option value="base">快速 · 142MB（默认）</option>
+              <option value="small">均衡 · 466MB（更准）</option>
+            </select>
+          </label>
+          <p v-if="inactiveWhisperText" class="set-hint">
+            {{ inactiveWhisperText }}
+            <button class="link-btn" @click="removeModel(inactiveWhisperName)">{{ pendingDelete === inactiveWhisperName ? "确认删除" : "删除" }}</button>
+          </p>
         </div>
-        <p class="set-hint">
-          在线翻译需要能访问 Google（自动走系统代理）；本地翻译 = 引擎 + 模型两个都装好后完全离线，没有内容限制。
-        </p>
+
+        <!-- 翻译卡：在线已就绪，本地按需安装 -->
+        <div class="cap-card">
+          <div class="cap-head">
+            <span class="cap-title">翻译</span>
+            <span class="cap-state ok">在线已就绪</span>
+          </div>
+          <label class="set-row">
+            <span>方式</span>
+            <select :value="engine" @change="changeEngine">
+              <option value="auto">自动（优先在线，失败用本地）</option>
+              <option value="online">仅在线翻译</option>
+              <option value="local">仅本地模型（离线）</option>
+            </select>
+          </label>
+          <template v-if="engine !== 'online'">
+            <label class="set-row">
+              <span>本地档位</span>
+              <select :value="mtModel" @change="changeMtModel">
+                <option value="light">轻量 · 1.1GB（推荐）</option>
+                <option value="high">高质量 · 4.4GB（更准）</option>
+              </select>
+            </label>
+            <div class="set-row">
+              <span class="set-label">
+                {{ mtLocalStateText }}
+                <small v-if="!mtLocalReady">安装后完全离线、无视内容限制{{ mtEngineInstalled ? "" : "（含推理引擎）" }}</small>
+              </span>
+              <button v-if="!mtLocalReady" class="btn small" :disabled="!!dl" @click="installLocalTranslation">
+                安装（约 {{ mtModel === "light" ? "1.1" : "4.4" }}GB）
+              </button>
+              <button v-else class="btn small ghost" @click="removeModel(mtModelName)">
+                {{ pendingDelete === mtModelName ? "确认释放" : "释放空间" }}
+              </button>
+            </div>
+          </template>
+          <p class="set-hint">在线秒回、零下载；本地完全离线、无内容限制。在线失败会自动落回本地，看片不中断。</p>
+        </div>
       </template>
 
       <!-- 播放 -->
@@ -248,19 +270,13 @@
 
         <template v-if="showWizard">
           <div class="wizard-card">
-            <p class="wizard-title">首次使用：下载离线模型</p>
+            <p class="wizard-title">字幕引擎后台准备中</p>
             <p class="wizard-text">
-              语音识别需要下载识别模型（约 466MB）；<br />
-              本地翻译 = 翻译引擎（约 12MB）+ 翻译模型（约 4.4GB），全离线、无视内容限制。<br />
-              在线翻译开箱即用，无需下载。下载支持断点续传，中途关掉也没关系。
+              正在自动下载识别模型（约 142MB，仅此一次）。<br />
+              下载完成后拖入视频即可看到字幕；翻译默认走在线，无需等待。
             </p>
             <div class="wizard-actions">
-              <button class="btn" :disabled="wizardDownloading" @click.stop="wizardDownloadAll">
-                {{ wizardButtonLabel }}
-              </button>
-              <button class="btn ghost" :disabled="wizardDownloading" @click.stop="wizardDismiss">
-                暂不下载，直接开始
-              </button>
+              <button class="btn ghost" @click.stop="showWizard = false">知道了</button>
             </div>
           </div>
         </template>
@@ -310,19 +326,26 @@
         <button class="btn small ghost" @click.stop="cancelExport">取消</button>
       </div>
 
-      <!-- 通知区：错误条 / 兜底引导 / 新版本，纵向堆叠避免互相遮挡 -->
+      <!-- 通知区：下载进度 / 错误条 / 兜底引导 / 新版本，纵向堆叠避免互相遮挡 -->
       <div class="notices">
+        <!-- 下载进度卡：全局可见（不必停在设置页），支持暂停/继续/取消 -->
+        <div v-if="dl" class="dl-bar">
+          <span class="dl-text">{{ dlNameText }} {{ dl.pct }}% · {{ dl.mb.toFixed(0) }}/{{ dl.total.toFixed(0) }}MB<template v-if="dl.state === 'downloading' && dlSpeedText"> · {{ dlSpeedText }}<template v-if="dlEtaText"> · 剩余 {{ dlEtaText }}</template></template></span>
+          <span class="dl-actions">
+            <button class="btn small ghost" @click.stop="dl.state === 'paused' ? resumeDownload() : pauseDownload()">{{ dl.state === "paused" ? "继续" : "暂停" }}</button>
+            <button class="btn small ghost" @click.stop="cancelDownload">取消</button>
+          </span>
+        </div>
+
         <div v-if="errorBar" class="err-bar">
           <span>{{ errorBar }}</span>
           <button class="err-close" title="关闭" @click.stop="errorBar = ''">✕</button>
         </div>
 
-        <!-- 在线翻译失败 → 引导下载本地引擎+模型（产品决策：告知 + 兜底） -->
+        <!-- 在线翻译失败 → 引导安装本地翻译（轻量档） -->
         <div v-if="needLocalModel" class="cta-bar">
-          <span>在线翻译不可用（可能被过滤或网络受限）。本地翻译可离线、无视屏蔽（约 4.4GB）。</span>
-          <button class="btn small" :disabled="downloading" @click.stop="downloadLocalModel">
-            {{ downloading ? `下载中 ${downloadPct}%` : "下载本地翻译" }}
-          </button>
+          <span>在线翻译不可用（可能被过滤或网络受限）。可安装本地翻译离线使用（轻量档约 1.1GB）。</span>
+          <button class="btn small" :disabled="!!dl" @click.stop="installLocalTranslation">安装本地翻译</button>
         </div>
 
         <!-- 新版本提示：应用内自动更新（下载完成后自动重启替换） -->
@@ -543,10 +566,8 @@ const idle = ref(false);
 let idleTimer: number | undefined;
 const engine = ref("auto");
 const needLocalModel = ref(false);
-const downloading = ref(false);
-const downloadPct = ref(0);
 
-// 模型管理与首启向导
+// 模型管理与首启
 interface ModelStatus {
   name: string;
   desc: string;
@@ -554,10 +575,21 @@ interface ModelStatus {
   sizeMb: number;
 }
 const modelStatus = ref<ModelStatus[]>([]);
-const downloadingName = ref("");
-const whisperModel = ref("small");
-const showWizard = ref(false);
-const wizardDownloading = ref(false);
+const whisperModel = ref("base"); // 识别档位：快速（默认）/均衡
+const mtModel = ref("light"); // 本地翻译档位：轻量 1.8B（默认）/高质量 7B
+const showWizard = ref(false); // 首启识别模型后台下载提示卡（可关）
+
+// 下载进度卡（全局唯一下载位；速度/剩余时间由前端按进度事件时间差计算）
+const dl = ref<{
+  name: string;
+  pct: number;
+  mb: number;
+  total: number;
+  speedMb: number;
+  state: "downloading" | "paused";
+} | null>(null);
+let lastProg: { mb: number; t: number } | null = null;
+let recognitionWasReady = true; // 启动时识别是否已就绪（决定首次就绪 toast）
 
 // 新版本检查（应用内自动更新）
 const updateInfo = ref<{ current: string; latest: string; hasUpdate: boolean; notes?: string | null } | null>(null);
@@ -603,6 +635,46 @@ let volSaveTimer: number | undefined;
 let lastPosSave = 0;
 
 const overlayClass = computed(() => [`of-${subFont.value}`, `op-${subPos.value}`]);
+
+// ---- 能力卡状态（识别 / 翻译） ----
+const recognitionReady = computed(
+  () =>
+    modelStatus.value.find(
+      (m) => m.name === (whisperModel.value === "small" ? "whisper-small" : "whisper-base")
+    )?.installed ?? false
+);
+const whisperStateText = computed(() => {
+  if (recognitionReady.value) return whisperModel.value === "small" ? "已就绪 · 均衡" : "已就绪 · 快速";
+  if (dl.value?.name.startsWith("whisper")) return `后台准备中 ${dl.value.pct}%`;
+  return "未就绪";
+});
+const inactiveWhisperName = computed(() => (whisperModel.value === "small" ? "whisper-base" : "whisper-small"));
+const inactiveWhisperText = computed(() => {
+  const m = modelStatus.value.find((x) => x.name === inactiveWhisperName.value);
+  return m?.installed ? `未使用的档位（${m.sizeMb}MB）可删除释放空间` : "";
+});
+const mtModelName = computed(() => (mtModel.value === "light" ? "translation-light" : "translation"));
+const mtModelInstalled = computed(
+  () => modelStatus.value.find((m) => m.name === mtModelName.value)?.installed ?? false
+);
+const mtEngineInstalled = computed(
+  () => modelStatus.value.find((m) => m.name === "translation-engine")?.installed ?? false
+);
+const mtLocalReady = computed(() => mtModelInstalled.value && mtEngineInstalled.value);
+const mtLocalStateText = computed(() => {
+  if (!mtEngineInstalled.value) return "未安装（含推理引擎）";
+  if (!mtModelInstalled.value) return "未安装";
+  return mtModel.value === "high" ? "已就绪 · 高质量" : "已就绪 · 轻量";
+});
+const dlNameText = computed(() => (dl.value ? modelNameText(dl.value.name) : ""));
+const dlSpeedText = computed(() =>
+  dl.value && dl.value.speedMb > 0.05 ? `${dl.value.speedMb.toFixed(1)}MB/s` : ""
+);
+const dlEtaText = computed(() => {
+  if (!dl.value || dl.value.speedMb <= 0.05 || dl.value.total <= dl.value.mb) return "";
+  const s = Math.round((dl.value.total - dl.value.mb) / dl.value.speedMb);
+  return s > 90 ? `${Math.round(s / 60)} 分钟` : `${s} 秒`;
+});
 
 const activeSub = computed(() => {
   // 二分定位最后一个 start ≤ 播放位置的段，再回看邻域找包含当前时间的
@@ -803,46 +875,59 @@ onMounted(async () => {
   await listen<{ name: string; downloadedMb: number; totalMb: number }>(
     "models://progress",
     (e) => {
-      downloading.value = true;
-      downloadingName.value = e.payload.name;
-      downloadPct.value = Math.min(
-        100,
-        Math.round((e.payload.downloadedMb / (e.payload.totalMb || 1)) * 100)
-      );
+      const now = Date.now() / 1000;
+      let speed = dl.value?.speedMb ?? 0;
+      if (lastProg && e.payload.downloadedMb > lastProg.mb) {
+        const dt = now - lastProg.t;
+        if (dt > 0.2) speed = (e.payload.downloadedMb - lastProg.mb) / dt;
+      }
+      lastProg = { mb: e.payload.downloadedMb, t: now };
+      dl.value = {
+        name: e.payload.name,
+        pct: Math.min(100, Math.round((e.payload.downloadedMb / (e.payload.totalMb || 1)) * 100)),
+        mb: e.payload.downloadedMb,
+        total: e.payload.totalMb,
+        speedMb: speed,
+        state: "downloading",
+      };
     }
   );
-  await listen<{ name: string }>("models://done", async () => {
-    downloading.value = false;
-    downloadingName.value = "";
+  await listen<{ name: string }>("models://paused", (e) => {
+    if (dl.value?.name === e.payload.name) dl.value.state = "paused";
+  });
+  await listen<{ name: string }>("models://canceled", (e) => {
+    if (dl.value?.name === e.payload.name) {
+      dl.value = null;
+      lastProg = null;
+      downloadQueue.value = [];
+    }
+  });
+  await listen<{ name: string }>("models://done", async (e) => {
+    dl.value = null;
+    lastProg = null;
     needLocalModel.value = false;
     await refreshModelStatus();
+    // 识别模型首次就绪：后台无感下载完成，告知用户核心功能可用
+    if (e.payload.name === "whisper-base" && !recognitionWasReady) {
+      showToast("字幕功能已就绪，拖入视频即可");
+    } else {
+      showToast(`${modelNameText(e.payload.name)}已就绪`);
+    }
     // 下载队列：上一个完成才启动下一个（后端同时只允许一个下载任务）
     if (downloadQueue.value.length > 0) {
       downloadQueue.value = downloadQueue.value.slice(1);
       pumpQueue();
-      return;
     }
-    if (wizardDownloading.value) {
-      wizardDownloading.value = false;
-      // 识别模型已装好即视为完成首启引导（M3：向导卡片不能再挂着）
-      if (modelStatus.value.find((m) => m.name === "whisper-small")?.installed) {
-        showWizard.value = false;
-        void invoke("cmd_set_setting", { key: "wizard_done", value: "1" }).catch(() => {});
-        showToast("模型就绪，拖入视频开始看片");
-        return;
-      }
-    }
-    showToast("模型下载完成");
   });
   await listen<string>("models://error", (e) => {
-    downloading.value = false;
-    downloadingName.value = "";
+    dl.value = null;
+    lastProg = null;
     downloadQueue.value = [];
-    wizardDownloading.value = false;
     showError(`模型下载失败: ${e.payload}`);
   });
   engine.value = await invoke<string>("cmd_mt_get_engine");
-  whisperModel.value = (await invoke<string>("cmd_get_setting", { key: "whisper_model" })) || "small";
+  whisperModel.value = (await invoke<string>("cmd_get_setting", { key: "whisper_model" })) || "base";
+  mtModel.value = (await invoke<string>("cmd_get_setting", { key: "mt_model" })) || "light";
   // 完整设置装载（缺省值与 UI 选项一一对应）
   subFont.value = (await invoke<string>("cmd_get_setting", { key: "sub_font" })) || "medium";
   subPos.value = (await invoke<string>("cmd_get_setting", { key: "sub_pos" })) || "bottom";
@@ -856,10 +941,12 @@ onMounted(async () => {
   ffmpegOk.value = await invoke<boolean>("cmd_check_ffmpeg").catch(() => true);
   void applyPersistedPlayer();
   await refreshModelStatus();
-  // 首启向导：识别模型未装且未跳过过
-  showWizard.value =
-    !modelStatus.value.find((m) => m.name === "whisper-small")?.installed &&
-    (await invoke<string>("cmd_get_setting", { key: "wizard_done" })) !== "1";
+  // 识别模型未装：后台自动下载快速档（不阻塞使用；就绪后 toast + 提示卡）
+  recognitionWasReady = modelStatus.value.some((m) => m.name.startsWith("whisper") && m.installed);
+  if (!recognitionWasReady) {
+    enqueueDownload(["whisper-base"]);
+    showWizard.value = true;
+  }
   // 新版本检查（设置可关；静默失败即可）
   if (autoUpdate.value) {
     updateInfo.value = await invoke<{
@@ -935,7 +1022,7 @@ async function refreshModelStatus() {
   modelStatus.value = await invoke<ModelStatus[]>("cmd_model_status");
 }
 
-// 下载队列：后端同时只允许一个下载任务，前端排队串行（向导「下载全部」/ 引导条都用它）
+// 下载队列：后端同时只允许一个下载任务，前端排队串行（首启自动下载 / 本地翻译安装 / 引导条都用它）
 const downloadQueue = ref<string[]>([]);
 
 function enqueueDownload(names: string[]) {
@@ -944,20 +1031,37 @@ function enqueueDownload(names: string[]) {
 }
 
 function pumpQueue() {
-  if (downloading.value || downloadQueue.value.length === 0) return;
+  // dl 非空（含暂停态）时不启动下一个：暂停是用户意图，恢复由「继续」触发
+  if (dl.value || downloadQueue.value.length === 0) return;
   void download(downloadQueue.value[0]);
 }
 
 async function download(name: string) {
-  if (downloading.value) return;
+  if (dl.value) return;
   await invoke("cmd_model_download", { name }).catch((e) => {
     downloadQueue.value = [];
     showError(String(e));
   });
 }
 
+async function pauseDownload() {
+  await invoke("cmd_model_pause").catch(() => {});
+}
+
+async function resumeDownload() {
+  if (!dl.value) return;
+  await invoke("cmd_model_download", { name: dl.value.name }).catch((e) => showError(String(e)));
+}
+
+async function cancelDownload() {
+  await invoke("cmd_model_cancel").catch(() => {});
+  dl.value = null;
+  lastProg = null;
+  downloadQueue.value = [];
+}
+
 async function removeModel(name: string) {
-  // 二次确认：3s 内再点一次才真正删除（防误触删掉几 GB 的模型）
+  // 二次确认：3s 内再点一次才真正删除，文案带后果（删了要重下）
   if (pendingDelete.value !== name) {
     pendingDelete.value = name;
     window.clearTimeout(pendingDeleteTimer);
@@ -968,7 +1072,7 @@ async function removeModel(name: string) {
   window.clearTimeout(pendingDeleteTimer);
   await invoke("cmd_model_delete", { name }).catch((e) => showError(String(e)));
   await refreshModelStatus();
-  showToast("模型已删除");
+  showToast(`${modelNameText(name)}已删除`);
 }
 
 async function changeWhisperModel(e: Event) {
@@ -977,30 +1081,36 @@ async function changeWhisperModel(e: Event) {
   await invoke("cmd_set_setting", { key: "whisper_model", value: v }).catch((e) =>
     showError(String(e))
   );
-  showToast("识别档位已保存，下次播放生效");
+  showToast("识别档位已保存，重启应用后生效");
 }
 
-const MODEL_LABELS: Record<string, string> = {
-  "whisper-small": "识别模型",
-  "whisper-base": "识别模型（快速档）",
-  "translation-engine": "翻译引擎",
-  translation: "翻译模型",
-};
-
-const wizardButtonLabel = computed(() => {
-  if (!wizardDownloading.value) return "下载全部模型（识别 + 本地翻译）";
-  const label = MODEL_LABELS[downloadingName.value] || "模型";
-  return `下载中 ${downloadPct}%（${label}）`;
-});
-
-function wizardDownloadAll() {
-  wizardDownloading.value = true;
-  enqueueDownload(["whisper-small", "translation-engine", "translation"]);
+function modelNameText(name: string): string {
+  return (
+    ({
+      "whisper-base": "字幕引擎（快速档）",
+      "whisper-small": "字幕引擎（均衡档）",
+      "translation-engine": "本地翻译引擎",
+      "translation-light": "本地翻译·轻量",
+      translation: "本地翻译·高质量",
+    } as Record<string, string>)[name] ?? name
+  );
 }
 
-async function wizardDismiss() {
-  await invoke("cmd_set_setting", { key: "wizard_done", value: "1" });
-  showWizard.value = false;
+// 安装本地翻译：引擎（如缺）+ 所选档位模型，一个动作串行装完
+function installLocalTranslation() {
+  const need: string[] = [];
+  if (!mtEngineInstalled.value) need.push("translation-engine");
+  if (!mtModelInstalled.value) need.push(mtModelName.value);
+  if (need.length) enqueueDownload(need);
+}
+
+async function changeMtModel(e: Event) {
+  const v = (e.target as HTMLSelectElement).value;
+  mtModel.value = v;
+  await invoke("cmd_set_setting", { key: "mt_model", value: v }).catch((e) =>
+    showError(String(e))
+  );
+  if (mtModelInstalled.value) showToast("本地翻译档位已切换，立即生效");
 }
 
 async function changeEngine(e: Event) {
@@ -1117,12 +1227,6 @@ async function applyPersistedPlayer() {
     speed.value = Math.round(sp * 10) / 10;
     await invoke("cmd_player_set_speed", { speed: speed.value }).catch(() => {});
   }
-}
-
-async function downloadLocalModel() {
-  if (downloading.value) return;
-  // 引擎 + 模型二件套：先引擎（12MB）后模型（4.4GB），队列串行
-  enqueueDownload(["translation-engine", "translation"]);
 }
 
 onUnmounted(() => {
@@ -2227,6 +2331,67 @@ onMounted(async () => {
   gap: 8px;
   margin-top: 8px;
   font-size: 11px;
+}
+
+/* ---- 能力卡（识别 / 翻译） ---- */
+.cap-card {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.cap-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.cap-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+}
+
+.cap-state {
+  font-size: 11px;
+  color: #8f8f9a;
+}
+
+.cap-state.ok {
+  color: #7dd487;
+}
+
+.cap-desc {
+  margin: 6px 0 4px;
+  font-size: 11px;
+  color: #8f8f9a;
+}
+
+/* ---- 下载进度条（通知区，全局可见） ---- */
+.dl-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: rgba(242, 181, 68, 0.12);
+  border: 1px solid rgba(242, 181, 68, 0.25);
+  font-size: 12px;
+  color: #f2e9d8;
+}
+
+.dl-text {
+  flex: 1;
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.dl-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
 }
 
 .model-desc {

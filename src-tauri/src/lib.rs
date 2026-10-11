@@ -60,6 +60,8 @@ pub fn run() {
             mt::cmd_mt_set_engine,
             mt::cmd_mt_get_engine,
             models::cmd_model_download,
+            models::cmd_model_pause,
+            models::cmd_model_cancel,
             models::cmd_model_status,
             models::cmd_model_delete,
             settings::cmd_get_setting,

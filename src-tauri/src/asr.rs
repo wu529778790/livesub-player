@@ -235,10 +235,11 @@ fn run_session(app: &AppHandle, ctx: &Arc<WhisperContext>, rx: &Receiver<Msg>, p
 }
 
 fn find_model() -> Option<PathBuf> {
-    let tier = crate::settings::read("whisper_model").unwrap_or_else(|| "small".into());
+    // 识别档位默认快速档（首启后台自动下载的就是它，就绪最快）
+    let tier = crate::settings::read("whisper_model").unwrap_or_else(|| "base".into());
     let file = match tier.as_str() {
-        "base" => "ggml-base.bin",
-        _ => "ggml-small.bin",
+        "small" => "ggml-small.bin",
+        _ => "ggml-base.bin",
     };
     let p = crate::settings::data_dir().join("models").join(file);
     p.is_file().then_some(p)
