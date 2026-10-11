@@ -245,7 +245,6 @@
           <span class="dz-main">把视频文件拖到这里，或点击选择</span>
           <span class="dz-sub">支持 MP4、MKV、MOV、WebM 等常见格式；拖入文件夹 = 整个文件夹排成播放列表</span>
         </button>
-        <button class="folder-link" @click="openFolder">或打开一个文件夹，批量播放里面的视频 →</button>
 
         <!-- 最近播放：点击直接续播（进度存本机；文件已删除的条目不显示） -->
         <div v-if="historyList.length" class="history">
@@ -1907,23 +1906,6 @@ onMounted(async () => {
   height: 100%;
   background: #f2b544;
   border-radius: 2px;
-}
-
-/* ---- 欢迎页「打开文件夹」入口 ---- */
-.folder-link {
-  margin-top: -14px;
-  border: none;
-  background: transparent;
-  color: #8f8f9a;
-  font-size: 12px;
-  cursor: pointer;
-  padding: 4px 12px;
-  border-radius: 6px;
-}
-
-.folder-link:hover {
-  color: #ffd479;
-  background: rgba(255, 255, 255, 0.05);
 }
 
 /* ---- 播放列表抽屉 ---- */
