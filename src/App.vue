@@ -19,41 +19,132 @@
         <button class="drawer-close" title="关闭" @click="settingsOpen = false">✕</button>
       </div>
 
-      <div class="drawer-section">常规</div>
-      <label class="set-row">
-        <span>翻译引擎</span>
-        <select :value="engine" @change="changeEngine">
-          <option value="auto">自动（优先在线，失败用本地）</option>
-          <option value="online">仅在线翻译</option>
-          <option value="local">仅本地模型（离线）</option>
-        </select>
-      </label>
-      <label class="set-row">
-        <span>语音识别</span>
-        <select :value="whisperModel" @change="changeWhisperModel">
-          <option value="small">均衡（默认，推荐）</option>
-          <option value="base">快速（电脑配置较低时）</option>
-        </select>
-      </label>
-
-      <div class="drawer-section">模型管理</div>
-      <div v-for="m in modelStatus" :key="m.name" class="model-row">
-        <span class="model-desc">{{ m.desc }}</span>
-        <span v-if="m.installed" class="model-ok">已装 {{ m.sizeMb }}MB</span>
-        <template v-else>
-          <button class="btn small" :disabled="downloadingName === m.name" @click="download(m.name)">
-            {{ downloadingName === m.name ? `下载中 ${downloadPct}%` : "下载" }}
-          </button>
-        </template>
+      <div class="set-tabs">
         <button
-          v-if="m.installed"
-          class="btn small ghost"
-          @click="removeModel(m.name)"
-        >{{ pendingDelete === m.name ? "确认删除" : "删除" }}</button>
+          v-for="t in SETTING_TABS"
+          :key="t.id"
+          class="set-tab"
+          :class="{ on: setTab === t.id }"
+          @click="setTab = t.id"
+        >{{ t.label }}</button>
       </div>
-      <p class="set-hint">
-        在线翻译需要能访问 Google（自动走系统代理）；本地翻译完全离线，没有内容限制。
-      </p>
+
+      <!-- 字幕 -->
+      <template v-if="setTab === 'subtitle'">
+        <label class="set-row">
+          <span>字幕字号</span>
+          <select :value="subFont" @change="changeSubFont">
+            <option value="small">小</option>
+            <option value="medium">中（推荐）</option>
+            <option value="large">大</option>
+          </select>
+        </label>
+        <label class="set-row">
+          <span>字幕位置</span>
+          <select :value="subPos" @change="changeSubPos">
+            <option value="bottom">贴底（推荐）</option>
+            <option value="raised">上移一档</option>
+            <option value="high">更高（避开进度条信息）</option>
+          </select>
+        </label>
+        <label class="set-row">
+          <span>默认字幕模式</span>
+          <select :value="mode" @change="changeSubMode">
+            <option value="双语">双语（推荐）</option>
+            <option value="译文">译文</option>
+            <option value="原文">原文</option>
+          </select>
+        </label>
+        <p class="set-hint">播放中也可随时用右键菜单或 1 / 2 / 3 切换字幕模式。</p>
+      </template>
+
+      <!-- 识别与翻译 -->
+      <template v-if="setTab === 'ai'">
+        <label class="set-row">
+          <span>识别语言</span>
+          <select :value="asrLang" @change="changeAsrLang">
+            <option value="auto">自动检测（推荐）</option>
+            <option value="zh">中文</option>
+            <option value="en">英语</option>
+            <option value="ja">日语</option>
+            <option value="ko">韩语</option>
+          </select>
+        </label>
+        <p class="set-hint">看已知语种的片时固定语言，识别更快更准；选自动则跟随内容切换。</p>
+        <label class="set-row">
+          <span>识别档位</span>
+          <select :value="whisperModel" @change="changeWhisperModel">
+            <option value="small">均衡（默认，推荐）</option>
+            <option value="base">快速（电脑配置较低时）</option>
+          </select>
+        </label>
+        <label class="set-row">
+          <span>翻译引擎</span>
+          <select :value="engine" @change="changeEngine">
+            <option value="auto">自动（优先在线，失败用本地）</option>
+            <option value="online">仅在线翻译</option>
+            <option value="local">仅本地模型（离线）</option>
+          </select>
+        </label>
+
+        <div class="drawer-section">模型管理</div>
+        <div v-for="m in modelStatus" :key="m.name" class="model-row">
+          <span class="model-desc">{{ m.desc }}</span>
+          <span v-if="m.installed" class="model-ok">已装 {{ m.sizeMb }}MB</span>
+          <template v-else>
+            <button class="btn small" :disabled="downloadingName === m.name" @click="download(m.name)">
+              {{ downloadingName === m.name ? `下载中 ${downloadPct}%` : "下载" }}
+            </button>
+          </template>
+          <button
+            v-if="m.installed"
+            class="btn small ghost"
+            @click="removeModel(m.name)"
+          >{{ pendingDelete === m.name ? "确认删除" : "删除" }}</button>
+        </div>
+        <p class="set-hint">
+          在线翻译需要能访问 Google（自动走系统代理）；本地翻译完全离线，没有内容限制。
+        </p>
+      </template>
+
+      <!-- 播放 -->
+      <template v-if="setTab === 'playback'">
+        <div class="set-row">
+          <span class="set-label">记住音量与倍速<small>下次启动沿用本次关闭前的音量 / 倍速</small></span>
+          <button class="switch" :class="{ on: rememberPlayer }" title="切换" @click="toggleRemember"><i /></button>
+        </div>
+        <div class="set-row">
+          <span class="set-label">启动时恢复上次播放<small>自动打开上次看的视频并跳到上次进度</small></span>
+          <button class="switch" :class="{ on: resumeLast }" title="切换" @click="toggleResume"><i /></button>
+        </div>
+      </template>
+
+      <!-- 通用 -->
+      <template v-if="setTab === 'general'">
+        <div class="set-row">
+          <span class="set-label">自动检查更新<small>启动时静默检查，有新版才提示</small></span>
+          <button class="switch" :class="{ on: autoUpdate }" title="切换" @click="toggleAutoUpdate"><i /></button>
+        </div>
+        <div class="set-row">
+          <span>当前版本</span>
+          <span class="set-value">v{{ appVersion || "…" }}</span>
+        </div>
+        <button class="btn small ghost set-btn" :disabled="checkingUpdate" @click="manualCheckUpdate">
+          {{ checkingUpdate ? "检查中…" : "检查更新" }}
+        </button>
+        <button class="btn small ghost set-btn" @click="openLogDir">打开日志文件夹</button>
+        <p class="set-hint">遇到问题时把日志文件夹里的最新 .log 文件发给开发者，可快速定位。</p>
+
+        <div class="drawer-section">项目</div>
+        <div class="set-row">
+          <span>官网</span>
+          <button class="link-btn" title="在浏览器打开官网" @click="openUrl(SITE_URL)">{{ SITE_URL.replace("https://", "") }}</button>
+        </div>
+        <div class="set-row">
+          <span>GitHub</span>
+          <button class="link-btn" title="在浏览器打开仓库" @click="openUrl(GITHUB_URL)">wu529778790/livesub-player</button>
+        </div>
+      </template>
     </div>
 
     <!-- 视频区域：播放中背景全透明，透出下层 mpv 画面；未加载时整窗不透明（见 .shell.is-empty）；输入由前端接管 -->
@@ -127,7 +218,7 @@
 
       <!-- 实时字幕 Overlay（技术方案决策 B：DOM 渲染，不用 mpv sub 轨）
            原则：只要识别出了原文就展示原文，翻译没到位不吞字幕 -->
-      <div v-if="activeSub" class="subtitle-overlay">
+      <div v-if="activeSub" class="subtitle-overlay" :class="overlayClass">
         <div v-if="mode !== '译文' || !activeTranslation" class="sub-src">{{ activeSub.text }}</div>
         <div v-if="mode !== '原文' && activeTranslation" class="sub-dst">{{ activeTranslation }}</div>
         <div
@@ -146,6 +237,12 @@
         </template>
       </div>
       <div v-if="asrError" class="asr-error">{{ asrError }}</div>
+
+      <!-- 全片字幕导出进度（异步识别整个视频，可取消） -->
+      <div v-if="exporting !== null" class="asr-progress export-pill">
+        <span>正在识别全片字幕 {{ exporting }}%</span>
+        <button class="btn small ghost" @click.stop="cancelExport">取消</button>
+      </div>
 
       <!-- 在线翻译失败 → 引导下载本地模型（产品决策：告知 + 兜底） -->
       <div v-if="needLocalModel" class="cta-bar">
@@ -220,6 +317,7 @@
       />
       <span class="vol-num">{{ Math.round(volume) }}</span>
       <button class="ctl-btn" title="截图到桌面（S）" @click="screenshot">📷</button>
+      <button class="ctl-btn" title="导出全片字幕 SRT（E）" @click="exportSubs">📄</button>
       <button class="ctl-btn" @click="toggleFullscreen">⛶</button>
     </footer>
 
@@ -229,6 +327,7 @@
       <button class="ctx-item" @click="ctxOpen = false; openFile()">打开文件…</button>
       <button class="ctx-item" @click="ctxOpen = false; togglePause()">{{ paused ? "播放" : "暂停" }}</button>
       <button class="ctx-item" @click="ctxOpen = false; screenshot()">截图</button>
+      <button class="ctx-item" @click="ctxOpen = false; exportSubs()">导出全片字幕…</button>
       <button class="ctx-item" @click="ctxOpen = false; toggleFullscreen()">全屏</button>
       <div class="ctx-divider" />
       <div class="ctx-label">字幕模式</div>
@@ -255,17 +354,19 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 
 const VIDEO_EXTS = ["mp4", "mkv", "avi", "mov", "webm", "m4v", "ts", "flv", "wmv", "rmvb"];
 
 const SPEED_PRESETS = [0.5, 0.75, 1, 1.25, 1.5, 2];
 
 const filename = ref("");
+const videoPath = ref(""); // 完整路径：导出字幕时默认同目录同名
 const status = ref("");
 const loaded = ref(false);
 const paused = ref(false);
@@ -323,6 +424,30 @@ const updatePct = ref<number | null>(null); // null=未在更新中
 const recognizing = ref<{ start: number; end: number } | null>(null);
 const asrError = ref("");
 const mode = ref<"译文" | "原文" | "双语">("双语");
+
+// ---- 设置（四组：字幕 / 识别与翻译 / 播放 / 通用） ----
+type SetTab = "subtitle" | "ai" | "playback" | "general";
+const SETTING_TABS: { id: SetTab; label: string }[] = [
+  { id: "subtitle", label: "字幕" },
+  { id: "ai", label: "识别·翻译" },
+  { id: "playback", label: "播放" },
+  { id: "general", label: "通用" },
+];
+const SITE_URL = "https://livesub-player.shenzjd.com/";
+const GITHUB_URL = "https://github.com/wu529778790/livesub-player";
+const setTab = ref<SetTab>("subtitle");
+const subFont = ref("medium"); // 字幕字号：small / medium / large
+const subPos = ref("bottom"); // 字幕位置：bottom / raised / high
+const asrLang = ref("auto"); // 识别语言：auto / zh / en / ja / ko
+const rememberPlayer = ref(true); // 记住音量与倍速
+const resumeLast = ref(true); // 启动时恢复上次播放
+const autoUpdate = ref(true); // 启动时自动检查更新
+const appVersion = ref("");
+const checkingUpdate = ref(false);
+let volSaveTimer: number | undefined;
+let lastPosSave = 0;
+
+const overlayClass = computed(() => [`of-${subFont.value}`, `op-${subPos.value}`]);
 
 const activeSub = computed(() => {
   for (let i = subs.value.length - 1; i >= 0; i--) {
@@ -387,6 +512,11 @@ onMounted(async () => {
     if (p.timePos != null && !dragging.value) {
       timePos.value = p.timePos;
       displayTime.value = p.timePos;
+      // 播放进度每 3s 落盘一次（供「启动恢复上次播放」用）
+      if (Math.abs(p.timePos - lastPosSave) >= 3) {
+        lastPosSave = p.timePos;
+        void invoke("cmd_set_setting", { key: "last_video_pos", value: String(Math.floor(p.timePos)) }).catch(() => {});
+      }
     }
     if (p.paused != null) paused.value = p.paused;
   });
@@ -416,6 +546,19 @@ onMounted(async () => {
     dst: string;
   }>("asr://translation", (e) => {
     translations.value.push(e.payload);
+  });
+  // 全片字幕导出任务（异步识别整个视频）
+  await listen<{ percent: number }>("export://progress", (e) => {
+    exporting.value = Math.round(e.payload.percent);
+  });
+  await listen<{ srt: string }>("export://done", async (e) => {
+    exporting.value = null;
+    await saveExportedSrt(e.payload.srt);
+  });
+  await listen<string>("export://error", (e) => {
+    exporting.value = null;
+    if (String(e.payload) === "已取消") showToast("已取消导出");
+    else status.value = `导出失败: ${e.payload}`;
   });
   await listen<string>("mt://unavailable", () => {
     mtAvailable.value = false;
@@ -450,21 +593,47 @@ onMounted(async () => {
   });
   engine.value = await invoke<string>("cmd_mt_get_engine");
   whisperModel.value = (await invoke<string>("cmd_get_setting", { key: "whisper_model" })) || "small";
+  // 完整设置装载（缺省值与 UI 选项一一对应）
+  subFont.value = (await invoke<string>("cmd_get_setting", { key: "sub_font" })) || "medium";
+  subPos.value = (await invoke<string>("cmd_get_setting", { key: "sub_pos" })) || "bottom";
+  asrLang.value = (await invoke<string>("cmd_get_setting", { key: "asr_language" })) || "auto";
+  mode.value =
+    ((await invoke<string>("cmd_get_setting", { key: "sub_mode" })) as "译文" | "原文" | "双语") || "双语";
+  rememberPlayer.value = ((await invoke<string>("cmd_get_setting", { key: "remember_player" })) ?? "1") !== "0";
+  resumeLast.value = ((await invoke<string>("cmd_get_setting", { key: "resume_last" })) ?? "1") !== "0";
+  autoUpdate.value = ((await invoke<string>("cmd_get_setting", { key: "auto_update" })) ?? "1") !== "0";
+  appVersion.value = await getVersion().catch(() => "");
+  void applyPersistedPlayer();
   await refreshModelStatus();
   // 首启向导：识别模型未装且未跳过过
   showWizard.value =
     !modelStatus.value.find((m) => m.name === "whisper-small")?.installed &&
     (await invoke<string>("cmd_get_setting", { key: "wizard_done" })) !== "1";
-  // 新版本检查（静默失败即可）
-  updateInfo.value = await invoke<{
-    current: string;
-    latest: string;
-    hasUpdate: boolean;
-    notes?: string | null;
-  }>("cmd_check_update").catch(() => null);
+  // 新版本检查（设置可关；静默失败即可）
+  if (autoUpdate.value) {
+    updateInfo.value = await invoke<{
+      current: string;
+      latest: string;
+      hasUpdate: boolean;
+      notes?: string | null;
+    }>("cmd_check_update").catch(() => null);
+  }
   await listen<number>("update://progress", (e) => {
     updatePct.value = e.payload;
   });
+  // 启动恢复上次播放（延迟 1.2s：避开 mpv 初始化与首帧渲染，且不打断自动化钩子）
+  window.setTimeout(async () => {
+    if (loaded.value || !resumeLast.value) return;
+    const last = await invoke<string>("cmd_get_setting", { key: "last_video" }).catch(() => null);
+    if (!last) return;
+    status.value = "正在恢复上次播放…";
+    await loadVideo(last);
+    const pos = Number(await invoke<string>("cmd_get_setting", { key: "last_video_pos" }).catch(() => null)) || 0;
+    if (pos > 5) {
+      await invoke("cmd_player_seek", { target: pos, absolute: true }).catch(() => {});
+    }
+    showToast(`已恢复上次播放：${filename.value}`);
+  }, 1200);
 });
 
 async function installUpdate() {
@@ -530,6 +699,101 @@ async function changeEngine(e: Event) {
   await invoke("cmd_mt_set_engine", { engine: v }).catch((e) => (status.value = String(e)));
 }
 
+// ---- 设置项处理器（四组） ----
+async function saveSetting(key: string, value: string) {
+  await invoke("cmd_set_setting", { key, value }).catch((e) => (status.value = String(e)));
+}
+
+function changeSubFont(e: Event) {
+  subFont.value = (e.target as HTMLSelectElement).value;
+  void saveSetting("sub_font", subFont.value);
+}
+
+function changeSubPos(e: Event) {
+  subPos.value = (e.target as HTMLSelectElement).value;
+  void saveSetting("sub_pos", subPos.value);
+}
+
+function changeSubMode(e: Event) {
+  mode.value = (e.target as HTMLSelectElement).value as "译文" | "原文" | "双语";
+  void saveSetting("sub_mode", mode.value);
+}
+
+function changeAsrLang(e: Event) {
+  asrLang.value = (e.target as HTMLSelectElement).value;
+  void saveSetting("asr_language", asrLang.value);
+  showToast(
+    asrLang.value === "auto"
+      ? "识别语言：自动检测"
+      : `识别语言固定为 ${asrLang.value.toUpperCase()}，下个识别会话生效`
+  );
+}
+
+function toggleRemember() {
+  rememberPlayer.value = !rememberPlayer.value;
+  void saveSetting("remember_player", rememberPlayer.value ? "1" : "0");
+}
+
+function toggleResume() {
+  resumeLast.value = !resumeLast.value;
+  void saveSetting("resume_last", resumeLast.value ? "1" : "0");
+}
+
+function toggleAutoUpdate() {
+  autoUpdate.value = !autoUpdate.value;
+  void saveSetting("auto_update", autoUpdate.value ? "1" : "0");
+}
+
+async function manualCheckUpdate() {
+  if (checkingUpdate.value) return;
+  checkingUpdate.value = true;
+  const info = await invoke<{
+    current: string;
+    latest: string;
+    hasUpdate: boolean;
+    notes?: string | null;
+  }>("cmd_check_update").catch(() => null);
+  checkingUpdate.value = false;
+  if (!info) {
+    showToast("检查更新失败，请检查网络");
+    return;
+  }
+  updateInfo.value = info;
+  if (!info.hasUpdate) showToast(`已是最新版本 v${info.current}`);
+}
+
+async function openLogDir() {
+  await invoke("cmd_open_log_dir").catch((e) => (status.value = String(e)));
+}
+
+async function openUrl(url: string) {
+  await invoke("cmd_open_url", { url }).catch((e) => (status.value = String(e)));
+}
+
+// 音量/倍速持久化：音量拖动高频触发，防抖 800ms 落盘
+function persistVolumeDebounced() {
+  if (!rememberPlayer.value) return;
+  window.clearTimeout(volSaveTimer);
+  volSaveTimer = window.setTimeout(() => {
+    void invoke("cmd_set_setting", { key: "volume", value: String(Math.round(volume.value)) }).catch(() => {});
+  }, 800);
+}
+
+// 启动/加载视频时回放记忆的音量倍速（mpv 未就绪时静默失败，loadVideo 后会再应用一次）
+async function applyPersistedPlayer() {
+  if (!rememberPlayer.value) return;
+  const v = Number(await invoke<string>("cmd_get_setting", { key: "volume" }).catch(() => null));
+  if (Number.isFinite(v) && v > 0 && v <= 100) {
+    volume.value = v;
+    await invoke("cmd_player_set_volume", { volume: v }).catch(() => {});
+  }
+  const sp = Number(await invoke<string>("cmd_get_setting", { key: "speed" }).catch(() => null));
+  if (Number.isFinite(sp) && sp >= 0.1 && sp <= 3) {
+    speed.value = Math.round(sp * 10) / 10;
+    await invoke("cmd_player_set_speed", { speed: speed.value }).catch(() => {});
+  }
+}
+
 async function downloadLocalModel() {
   if (downloading.value) return;
   await invoke("cmd_model_download", { name: "translation" }).catch((e) => (status.value = String(e)));
@@ -583,10 +847,51 @@ async function screenshot() {
   }
 }
 
+// ---- 导出全片字幕：后台异步识别整个视频（0 → 片尾），完成后选位置保存 ----
+const exporting = ref<number | null>(null); // null=空闲，否则为百分比
+const exportDefaultPath = ref("");
+
+async function exportSubs() {
+  if (exporting.value !== null) {
+    showToast("全片识别已在进行中");
+    return;
+  }
+  if (!loaded.value || !videoPath.value || !duration.value) {
+    showToast("请先打开视频");
+    return;
+  }
+  const dir = videoPath.value.split("/").slice(0, -1).join("/");
+  const stem = (filename.value || "subtitles").replace(/\.[^.]+$/, "");
+  exportDefaultPath.value = dir ? `${dir}/${stem}.srt` : `${stem}.srt`;
+  const ok = await invoke("cmd_export_full_srt", {
+    path: videoPath.value,
+    duration: duration.value,
+  }).catch((e) => {
+    showToast(String(e));
+    return null;
+  });
+  if (ok !== null) showToast("开始识别全片字幕，完成后选择保存位置");
+}
+
+async function cancelExport() {
+  await invoke("cmd_cancel_export").catch(() => {});
+}
+
+async function saveExportedSrt(srt: string) {
+  const target = await save({
+    defaultPath: exportDefaultPath.value,
+    filters: [{ name: "SRT 字幕", extensions: ["srt"] }],
+  });
+  if (!target) return;
+  await invoke("cmd_export_srt", { path: target, content: srt }).catch((e) => (status.value = String(e)));
+  showToast("字幕已保存");
+}
+
 async function changeVolume(e: Event) {
   const v = Number((e.target as HTMLInputElement).value);
   volume.value = v;
   await invoke("cmd_player_set_volume", { volume: v }).catch((e) => (status.value = String(e)));
+  persistVolumeDebounced();
 }
 
 function fmtSpeed(s: number): string {
@@ -599,6 +904,9 @@ async function setSpeed(s: number) {
   speed.value = next;
   speedPopOpen.value = false;
   await invoke("cmd_player_set_speed", { speed: next }).catch((e) => (status.value = String(e)));
+  if (rememberPlayer.value) {
+    void invoke("cmd_set_setting", { key: "speed", value: String(next) }).catch(() => {});
+  }
   showToast(`倍速 ${fmtSpeed(next)}`);
 }
 
@@ -687,8 +995,12 @@ async function loadVideo(path: string) {
   status.value = `加载中…`;
   try {
     await invoke("cmd_player_load", { path });
+    videoPath.value = path;
     filename.value = path.split("/").pop() || path;
     loaded.value = true;
+    // 记住本次播放的文件（启动恢复用）+ 回放记忆的音量倍速
+    void invoke("cmd_set_setting", { key: "last_video", value: path }).catch(() => {});
+    void applyPersistedPlayer();
   } catch (e) {
     status.value = String(e);
   }
@@ -741,6 +1053,10 @@ function onKey(e: KeyboardEvent) {
     case "S":
       screenshot();
       break;
+    case "e":
+    case "E":
+      exportSubs();
+      break;
     case "[":
       setSpeed(speed.value - 0.1);
       break;
@@ -758,6 +1074,7 @@ function onKey(e: KeyboardEvent) {
 async function changeVolumeTo(v: number) {
   volume.value = v;
   await invoke("cmd_player_set_volume", { volume: v }).catch((e) => (status.value = String(e)));
+  persistVolumeDebounced();
 }
 
 function fmtTime(t: number): string {
@@ -990,7 +1307,7 @@ onMounted(async () => {
   min-height: 16px;
 }
 
-/* 字幕 Overlay：底部居中，黑描边白字 */
+/* 字幕 Overlay：底部居中，黑描边白字；字号/位置由设置档位类覆盖 */
 .subtitle-overlay {
   position: absolute;
   left: 50%;
@@ -999,6 +1316,28 @@ onMounted(async () => {
   max-width: 80%;
   text-align: center;
   pointer-events: none;
+}
+
+/* 字幕字号档位（原文 28 / 译文 24 为中档基准） */
+.of-small .sub-src {
+  font-size: 22px;
+}
+.of-small .sub-dst {
+  font-size: 19px;
+}
+.of-large .sub-src {
+  font-size: 36px;
+}
+.of-large .sub-dst {
+  font-size: 31px;
+}
+
+/* 字幕位置档位 */
+.op-raised {
+  bottom: 16%;
+}
+.op-high {
+  bottom: 26%;
 }
 
 .sub-src {
@@ -1042,6 +1381,15 @@ onMounted(async () => {
   font-size: 11px;
   pointer-events: none;
   font-variant-numeric: tabular-nums;
+}
+
+/* 全片导出进度：在识别进度下方，取消按钮可点 */
+.export-pill {
+  top: 48px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  pointer-events: auto;
 }
 
 .asr-error {
@@ -1115,6 +1463,109 @@ onMounted(async () => {
 
 .drawer-close:hover {
   color: #fff;
+}
+
+/* 设置页签 */
+.set-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.set-tab {
+  flex: 1;
+  padding: 6px 2px;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  color: #9a9aa5;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.set-tab:hover {
+  color: #fff;
+}
+
+.set-tab.on {
+  background: rgba(255, 212, 121, 0.14);
+  color: #ffd479;
+  font-weight: 600;
+}
+
+/* 开关（boolean 设置项） */
+.switch {
+  position: relative;
+  flex: none;
+  width: 38px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.18);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.switch i {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  transition: left 0.15s;
+}
+
+.switch.on {
+  background: #ffd479;
+}
+
+.switch.on i {
+  left: 18px;
+}
+
+/* 带说明文字的设置行 */
+.set-label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.set-label small {
+  font-size: 11px;
+  color: #8f8f9a;
+}
+
+.set-value {
+  color: #9a9aa5;
+  font-size: 13px;
+}
+
+.set-btn {
+  display: block;
+  width: 100%;
+  margin-top: 8px;
+  text-align: center;
+}
+
+/* 项目链接（官网 / GitHub） */
+.link-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  color: #ffd479;
+  font-size: 12px;
+  cursor: pointer;
+  word-break: break-all;
+  text-align: right;
+}
+
+.link-btn:hover {
+  text-decoration: underline;
 }
 
 .drawer-section {

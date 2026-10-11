@@ -54,3 +54,42 @@ pub fn cmd_get_setting(key: String) -> Option<String> {
 pub fn cmd_set_setting(key: String, value: String) -> Result<(), String> {
     write(&key, &value)
 }
+
+/// 打开日志目录（设置页「打开日志文件夹」入口，排查 bug 用）
+#[tauri::command]
+pub fn cmd_open_log_dir(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    let dir = app.path().app_log_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    reveal(&dir.display().to_string())?;
+    log::info!("[settings] 打开日志目录: {}", dir.display());
+    Ok(())
+}
+
+/// 用系统浏览器打开链接（设置页「官网 / GitHub」入口）
+/// 白名单校验：前端被注入也不允许打开任意地址
+#[tauri::command]
+pub fn cmd_open_url(url: String) -> Result<(), String> {
+    const ALLOWED: [&str; 2] = [
+        "https://github.com/wu529778790/livesub-player",
+        "https://livesub-player.shenzjd.com/",
+    ];
+    if !ALLOWED.contains(&url.as_str()) {
+        return Err(format!("不允许打开链接: {url}"));
+    }
+    reveal(&url)?;
+    log::info!("[settings] 打开链接: {url}");
+    Ok(())
+}
+
+/// 跨平台调系统默认方式打开目录/URL
+fn reveal(target: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let r = std::process::Command::new("open").arg(target).spawn();
+    #[cfg(target_os = "windows")]
+    let r = std::process::Command::new("explorer").arg(target).spawn();
+    #[cfg(target_os = "linux")]
+    let r = std::process::Command::new("xdg-open").arg(target).spawn();
+    r.map_err(|e| e.to_string())?;
+    Ok(())
+}

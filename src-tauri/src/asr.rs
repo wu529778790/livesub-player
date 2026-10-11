@@ -10,7 +10,7 @@
 
 use std::io::Read;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -190,8 +190,12 @@ fn run_session(
         let mut samples = vec![0f32; WINDOW_SAMPLES];
         let mut last_text = String::new();
         let mut repeat_count = 0usize;
-        // 语言：首窗自动检测，之后钉住（方案 §4.2 源语言自动猜）
-        let mut detected_lang: Option<String> = None;
+        // 语言：设置里强制指定则整段钉住（跳过检测）；否则首窗自动检测后钉住
+        let mut detected_lang: Option<String> =
+            crate::settings::read("asr_language").filter(|l| !l.is_empty() && l != "auto");
+        if detected_lang.is_some() {
+            log::info!("[asr] 使用指定识别语言: {}", detected_lang.clone().unwrap_or_default());
+        }
 
         loop {
             // 窗口间轮询：seek / 换片 / 关停
@@ -455,5 +459,252 @@ fn ffmpeg_path() -> &'static str {
         "/opt/homebrew/bin/ffmpeg"
     } else {
         "ffmpeg"
+    }
+}
+
+// ---------- 全片字幕导出（异步识别整个视频 → SRT） ----------
+//
+// 与实时识别管线完全独立：单独的 whisper 上下文 + ffmpeg 管道，从 0 顺序
+// 跑到片尾，不受播放 seek 影响。可识别中并行（CPU 足够，RTF 均 <0.3）。
+
+pub struct ExportState {
+    running: AtomicBool,
+    cancel: AtomicBool,
+}
+
+impl Default for ExportState {
+    fn default() -> Self {
+        Self {
+            running: AtomicBool::new(false),
+            cancel: AtomicBool::new(false),
+        }
+    }
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportProgress {
+    percent: f64,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportDone {
+    srt: String,
+}
+
+#[tauri::command]
+pub fn cmd_export_full_srt(app: AppHandle, path: String, duration: f64) -> Result<(), String> {
+    let st = app.state::<ExportState>();
+    if st.running.swap(true, Ordering::SeqCst) {
+        return Err("已有导出任务进行中".into());
+    }
+    if !PathBuf::from(&path).is_file() {
+        st.running.store(false, Ordering::SeqCst);
+        return Err(format!("文件不存在: {path}"));
+    }
+    st.cancel.store(false, Ordering::SeqCst);
+    log::info!("[export] 全片字幕识别开始: {path}（时长 {duration:.0}s）");
+    let app2 = app.clone();
+    std::thread::spawn(move || {
+        let r = run_export(&app2, &path, duration);
+        app2.state::<ExportState>().running.store(false, Ordering::SeqCst);
+        match r {
+            Ok(()) => {}
+            Err(e) if e == "已取消" => {
+                log::info!("[export] 全片识别已取消");
+                let _ = app2.emit("export://error", e);
+            }
+            Err(e) => {
+                log::error!("[export] 全片识别失败: {e}");
+                let _ = app2.emit("export://error", e);
+            }
+        }
+    });
+    Ok(())
+}
+
+#[tauri::command]
+pub fn cmd_cancel_export(app: AppHandle) -> Result<(), String> {
+    app.state::<ExportState>().cancel.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
+fn run_export(app: &AppHandle, path: &str, duration: f64) -> Result<(), String> {
+    let cancelled =
+        || app.state::<ExportState>().cancel.load(Ordering::SeqCst);
+
+    let Some(model_path) = find_model() else {
+        return Err("未找到 whisper 模型：请先在设置中下载识别模型".into());
+    };
+    let t0 = Instant::now();
+    let ctx = WhisperContext::new_with_params(
+        &model_path.to_string_lossy(),
+        WhisperContextParameters::default(),
+    )
+    .map_err(|e| format!("whisper 模型加载失败: {e}"))?;
+    log::info!("[export] 模型加载完成 {:.2}s", t0.elapsed().as_secs_f64());
+
+    let mut child = spawn_ffmpeg(path, 0.0)?;
+    let Some(mut stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        return Err("ffmpeg 管道建立失败".into());
+    };
+
+    let mut byte_buf = vec![0u8; WINDOW_SAMPLES * 4];
+    let mut samples = vec![0f32; WINDOW_SAMPLES];
+    let mut segs: Vec<(f64, f64, String)> = Vec::new();
+    let mut window_idx: u64 = 0;
+    // 顺序全片识别，无 seek 重叠，天然无重复段
+    let mut last_text = String::new();
+    let mut repeat_count = 0usize;
+    let mut detected_lang: Option<String> =
+        crate::settings::read("asr_language").filter(|l| !l.is_empty() && l != "auto");
+
+    loop {
+        if cancelled() {
+            let _ = child.kill();
+            return Err("已取消".into());
+        }
+        match read_exact_or_eof(&mut stdout, &mut byte_buf) {
+            ReadOutcome::Full => {}
+            ReadOutcome::Eof => {
+                let _ = child.kill();
+                break;
+            }
+            ReadOutcome::Error => {
+                let _ = child.kill();
+                return Err("ffmpeg 音频读取失败".into());
+            }
+        }
+        for (i, chunk) in byte_buf.chunks_exact(4).enumerate() {
+            samples[i] = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        }
+        let window_start = (window_idx as f64) * (WINDOW_SAMPLES as f64 / SAMPLE_RATE as f64);
+        let window_end = window_start + WINDOW_SAMPLES as f64 / SAMPLE_RATE as f64;
+
+        if energy_vad(&samples) < VAD_MIN_SPEECH_RATIO {
+            window_idx += 1;
+            continue;
+        }
+
+        let t_infer = Instant::now();
+        let mut state = match ctx.create_state() {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = child.kill();
+                return Err(format!("create_state 失败: {e}"));
+            }
+        };
+        if state.full(make_params(detected_lang.as_deref()), &samples).is_err() {
+            window_idx += 1;
+            continue;
+        }
+        if detected_lang.is_none() {
+            if let Ok(id) = state.full_lang_id_from_state() {
+                if let Some(code) = whisper_rs::get_lang_str(id) {
+                    log::info!("[export] 检测语言: {code}");
+                    detected_lang = Some(code.to_string());
+                }
+            }
+        }
+        let n_seg = state.full_n_segments().unwrap_or(0);
+        for i in 0..n_seg {
+            let text = state
+                .full_get_segment_text(i)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            if text.is_empty() {
+                continue;
+            }
+            // 连续重复行去重（与实时管线同一套幻觉治理）
+            if text == last_text {
+                repeat_count += 1;
+                if repeat_count >= 3 {
+                    continue;
+                }
+            } else {
+                last_text = text.clone();
+                repeat_count = 0;
+            }
+            let seg_start =
+                window_start + state.full_get_segment_t0(i).unwrap_or(0) as f64 / 100.0;
+            let seg_end = window_start + state.full_get_segment_t1(i).unwrap_or(0) as f64 / 100.0;
+            segs.push((seg_start, seg_end, text));
+        }
+        window_idx += 1;
+        if duration > 0.0 {
+            let percent = (window_end / duration * 100.0).min(99.0);
+            let _ = app.emit("export://progress", ExportProgress { percent });
+        }
+        log::debug!(
+            "[export] 窗 {window_idx} [{window_start:.1}-{window_end:.1}] 推理 {:.2}s",
+            t_infer.elapsed().as_secs_f64()
+        );
+    }
+
+    if segs.is_empty() {
+        return Err("没有识别到任何语音内容".into());
+    }
+    let srt = build_srt(&segs);
+    log::info!(
+        "[export] 全片识别完成：{} 条字幕，SRT {}KB",
+        segs.len(),
+        srt.len() / 1024
+    );
+    let _ = app.emit("export://done", ExportDone { srt });
+    Ok(())
+}
+
+fn build_srt(segs: &[(f64, f64, String)]) -> String {
+    let mut out = String::new();
+    for (i, (start, end, text)) in segs.iter().enumerate() {
+        out.push_str(&format!(
+            "{}\n{} --> {}\n{}\n\n",
+            i + 1,
+            srt_time(*start),
+            srt_time(*end),
+            text
+        ));
+    }
+    out
+}
+
+fn srt_time(t: f64) -> String {
+    let ms = (t.max(0.0) * 1000.0).round() as u64;
+    format!(
+        "{:02}:{:02}:{:02},{:03}",
+        ms / 3600000,
+        ms % 3600000 / 60000,
+        ms % 60000 / 1000,
+        ms % 1000
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn srt_time_formats_timestamps() {
+        assert_eq!(srt_time(0.0), "00:00:00,000");
+        assert_eq!(srt_time(12.5), "00:00:12,500");
+        assert_eq!(srt_time(83.456), "00:01:23,456");
+        assert_eq!(srt_time(3661.2), "01:01:01,200");
+        assert_eq!(srt_time(-1.0), "00:00:00,000"); // 负时间钳到 0
+    }
+
+    #[test]
+    fn build_srt_numbers_blocks_and_joins_with_blank_lines() {
+        let segs = vec![
+            (0.0, 2.0, "こんにちは".to_string()),
+            (120.4, 123.2, "All I need".to_string()),
+        ];
+        assert_eq!(
+            build_srt(&segs),
+            "1\n00:00:00,000 --> 00:00:02,000\nこんにちは\n\n\
+             2\n00:02:00,400 --> 00:02:03,200\nAll I need\n\n"
+        );
     }
 }

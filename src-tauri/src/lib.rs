@@ -1,4 +1,5 @@
 mod asr;
+mod export;
 mod models;
 mod mt;
 mod player;
@@ -37,6 +38,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(player::PlayerState::default())
         .manage(asr::AsrState::default())
+        .manage(asr::ExportState::default())
         .manage(mt::MtState::default())
         .manage(models::ModelsState::default())
         .manage(update::UpdateState::default())
@@ -56,6 +58,11 @@ pub fn run() {
             models::cmd_model_delete,
             settings::cmd_get_setting,
             settings::cmd_set_setting,
+            settings::cmd_open_log_dir,
+            settings::cmd_open_url,
+            export::cmd_export_srt,
+            asr::cmd_export_full_srt,
+            asr::cmd_cancel_export,
             update::cmd_check_update,
             update::cmd_install_update,
         ])
