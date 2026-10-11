@@ -8,17 +8,10 @@ on:
 
 jobs:
   build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-latest
-            bundles: app
-          - os: ubuntu-22.04
-            bundles: deb
-          - os: windows-latest
-            bundles: nsis
-    runs-on: ${{ matrix.os }}
+    # 产品决策：Release 只出 macOS（Apple Silicon）产物。Windows/Linux 播放内核
+    # 接入前，装上也放不了视频——上架空壳安装包只会换来差评，所以 release 流水线
+    # 不再构建它们；编译验证仍在 build.yml 三平台矩阵里做。
+    runs-on: macos-latest
     env:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
       CMAKE_OSX_DEPLOYMENT_TARGET: "11.0"
@@ -32,14 +25,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: 安装 Linux 系统依赖
-        if: matrix.os == 'ubuntu-22.04'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf
-
       - name: 安装 macOS 依赖（libmpv）
-        if: matrix.os == 'macos-latest'
         run: brew install mpv
 
       - name: 安装前端依赖
@@ -47,27 +33,9 @@ jobs:
 
       # Release 用 release 构建（关闭调试信息，体积小性能好）
       - name: 构建 release
-        run: npm run tauri -- build --bundles ${{ matrix.bundles }}
-
-      # Windows 更新包：对 NSIS 安装器做 minisign 签名（latest.json 引用）
-      # 注意：npm run 会把 cwd 重置回 package.json 所在的仓库根，
-      # 签名路径必须写全（先 ls 拿文件名，再回仓库根用相对全路径签名）
-      - name: 签名自动更新包（Windows）
-        if: matrix.os == 'windows-latest'
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
-        shell: bash
-        run: |
-          cd src-tauri/target/release/bundle/nsis
-          f=$(ls *-setup.exe | head -n 1)
-          cd "$GITHUB_WORKSPACE"
-          npm run tauri -- signer sign -k "$TAURI_SIGNING_PRIVATE_KEY" \
-            --app-version "${GITHUB_REF_NAME#v}" "src-tauri/target/release/bundle/nsis/$f"
-          ls -l src-tauri/target/release/bundle/nsis/*.exe*
+        run: npm run tauri -- build --bundles app
 
       - name: 内嵌 libmpv 运行时（macOS 开箱即用）
-        if: matrix.os == 'macos-latest'
         run: |
           brew install dylibbundler
           APP="src-tauri/target/release/bundle/macos/LiveSub-Player.app"
@@ -84,31 +52,31 @@ jobs:
           codesign --force --deep -s - "$APP"
 
       - name: 打包 macOS .app 为 zip
-        if: matrix.os == 'macos-latest'
         run: |
           cd src-tauri/target/release/bundle/macos
           zip -qry "$GITHUB_WORKSPACE/LiveSub-Player-macOS.zip" LiveSub-Player.app
 
-      # 标准 macOS 安装方式：打开 dmg 拖入 Applications。
+      # 标准 macOS 安装方式：拖入 Applications 的引导窗口（标题/箭头/公证提示烘焙在背景图里）。
       # 不能用 tauri bundler 的 dmg——它在 dylibbundler 内嵌 libmpv 之前打包，会缺运行时；
-      # 必须在内嵌+重签之后手工 hdiutil 制作（app + Applications 软链 = 拖拽窗口）
-      - name: 制作 macOS 安装 dmg（拖入 Applications）
-        if: matrix.os == 'macos-latest'
+      # 必须在内嵌+重签之后用 create-dmg 手工制作（背景图与图标坐标见 packaging/dmg/）。
+      # CI 的 macOS runner 支持 Finder AppleScript（create-dmg 内部用），失败会自动重试。
+      - name: 安装 create-dmg
+        run: brew install create-dmg
+
+      - name: 制作 macOS 安装 DMG（拖入 Applications 引导窗口）
         run: |
           mkdir -p dmg-stage
           cp -R src-tauri/target/release/bundle/macos/LiveSub-Player.app dmg-stage/
-          ln -s /Applications dmg-stage/Applications
-          hdiutil create -volname "LiveSub-Player" -srcfolder dmg-stage -ov -format UDZO \
-            "$GITHUB_WORKSPACE/LiveSub-Player.dmg"
+          bash packaging/dmg/make-dmg.sh dmg-stage LiveSub-Player.dmg
           rm -rf dmg-stage
 
       # 自动更新包：必须在内嵌 libmpv + 重签之后再打 tar（bundler 自带产物是内嵌前的），
       # 手工 minisign 签名（createUpdaterArtifacts 保持 false，本地构建无需密钥）
       - name: 打自动更新包并签名（macOS）
-        if: matrix.os == 'macos-latest'
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+          # 私钥已加密：密码单列为第二个 secret（2026-10-11 轮换，旧无密码钥已归档本地）
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           cd src-tauri/target/release/bundle/macos
           tar -czf "$GITHUB_WORKSPACE/LiveSub-Player.app.tar.gz" LiveSub-Player.app
@@ -117,26 +85,7 @@ jobs:
             --app-version "${GITHUB_REF_NAME#v}" "LiveSub-Player.app.tar.gz"
           ls -l LiveSub-Player.app.tar.gz*
 
-      - name: 上传产物（Linux）
-        if: matrix.os == 'ubuntu-22.04'
-        uses: actions/upload-artifact@v4
-        with:
-          name: livesub-ubuntu
-          path: src-tauri/target/release/bundle/deb/*.deb
-          if-no-files-found: error
-
-      - name: 上传产物（Windows）
-        if: matrix.os == 'windows-latest'
-        uses: actions/upload-artifact@v4
-        with:
-          name: livesub-windows
-          path: |
-            src-tauri/target/release/bundle/nsis/*.exe
-            src-tauri/target/release/bundle/nsis/*.sig
-          if-no-files-found: error
-
       - name: 上传产物（macOS）
-        if: matrix.os == 'macos-latest'
         uses: actions/upload-artifact@v4
         with:
           name: livesub-macos
@@ -165,6 +114,14 @@ jobs:
       - name: 读取版本说明（tag 注释）
         run: git tag -l --format='%(contents)' "${GITHUB_REF_NAME}" > release-notes.md
 
+      # sha256 清单：install.sh 下载后校验，防下载损坏/篡改
+      - name: 生成 SHA256 校验文件
+        working-directory: artifacts
+        run: |
+          sha256sum LiveSub-Player-macOS.zip LiveSub-Player.dmg LiveSub-Player.app.tar.gz \
+            > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
       - name: 生成 latest.json（自动更新清单）
         env:
           REPO: ${{ github.repository }}
@@ -180,15 +137,12 @@ jobs:
           notes = next((l.strip() for l in open("release-notes.md") if l.strip()), f"LiveSub-Player {tag}")
           # 签名文件是 minisign 多行文本，必须原样读入再 json 序列化（不能 shell 拼接）
           mac_sig = open("artifacts/LiveSub-Player.app.tar.gz.sig").read().strip()
-          win_exe = next(f for f in os.listdir("artifacts") if f.endswith("-setup.exe"))
-          win_sig = open(os.path.join("artifacts", win_exe + ".sig")).read().strip()
           data = {
               "version": version,
               "notes": notes,
               "pub_date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
               "platforms": {
                   "darwin-aarch64": {"signature": mac_sig, "url": f"{base}/LiveSub-Player.app.tar.gz"},
-                  "windows-x86_64": {"signature": win_sig, "url": f"{base}/{win_exe}"},
               },
           }
           json.dump(data, open("latest.json", "w"), indent=2)
@@ -202,12 +156,11 @@ jobs:
           prerelease: false
           body_path: release-notes.md
           files: |
-            artifacts/*.deb
-            artifacts/*.exe
-            artifacts/*.sig
             artifacts/*.zip
             artifacts/*.dmg
             artifacts/*.tar.gz
+            artifacts/*.sig
+            artifacts/SHA256SUMS.txt
             latest.json
 
       # 历史版本没有保留价值：仅保留最近 3 个 Release（含本次），

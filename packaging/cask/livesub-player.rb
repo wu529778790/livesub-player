@@ -16,12 +16,16 @@
 cask "livesub-player" do
   arch arm: "arm64"
 
-  version "0.2.1"
-  sha256 "0d56cd5776529112aefc7e8adc65925053f124a656eb4d1f33061d59daf56c97"
+  # 注意：本仓库的 Release 清理策略只保留最近 3 个版本——cask 若指向被清理的
+  # tag 会 404。发新版后请立即同步更新此文件并自建 tap 发布。
+  # TODO(v1.0.0)：sha256 还是 v1.0.5 旧包的——v1.0.0 发布后取 Release 里的
+  # SHA256SUMS.txt（或下载 zip shasum -a 256）替换本行并提交。
+  version "1.0.0"
+  sha256 "1160b948e646c0b7221b312d09f0f9798949174c852ab08d8d6875a490afa0ac"
 
-  url "https://github.com/wu529778790/livesub-player/releases/download/v#{version}-alpha/LiveSub-Player-macOS.zip"
+  url "https://github.com/wu529778790/livesub-player/releases/download/v#{version}/LiveSub-Player-macOS.zip"
   name "LiveSub-Player"
-  desc "实时语音识别 + 双语字幕的跨平台桌面播放器"
+  desc "实时语音识别 + 双语字幕的 macOS 桌面播放器"
   homepage "https://github.com/wu529778790/livesub-player"
 
   # Homebrew 下载的文件不带 quarantine 标记，装完双击即开，无 Gatekeeper 拦截
@@ -29,7 +33,7 @@ cask "livesub-player" do
 
   livecheck do
     url "https://api.github.com/repos/wu529778790/livesub-player/releases?per_page=1"
-    regex(/"tag_name":\s*"v?(\d+(?:\.\d+)+-alpha(?:\.\d+)?)"/i)
+    regex(/"tag_name":\s*"v?(\d+(?:\.\d+)+)"/i)
     strategy :json do |json, regex|
       json.map do |release|
         release["tag_name"]&.[](regex, 1)
@@ -38,8 +42,10 @@ cask "livesub-player" do
   end
 
   depends_on mac: ">= :big_sur" # MACOSX_DEPLOYMENT_TARGET=11.0，仅 Apple Silicon
+  depends_on arch: :arm64
 
   caveats <<~EOS
     当前 Release 仅提供 Apple Silicon（arm64）构建，Intel Mac 暂不支持。
+    字幕识别依赖 ffmpeg：brew install ffmpeg（应用启动时会检测并引导）。
   EOS
 end

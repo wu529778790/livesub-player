@@ -8,7 +8,7 @@
 #   一键安装（最新版，含 prerelease）：
 #     curl -fsSL https://raw.githubusercontent.com/wu529778790/livesub-player/main/install.sh | bash
 #   指定版本：
-#     curl -fsSL https://raw.githubusercontent.com/wu529778790/livesub-player/main/install.sh | bash -s -- v0.2.0-alpha
+#     curl -fsSL https://raw.githubusercontent.com/wu529778790/livesub-player/main/install.sh | bash -s -- v1.0.0
 #   或下载后执行：
 #     ./install.sh [tag]
 
@@ -48,7 +48,8 @@ URL="$(printf '%s' "$JSON" \
   | head -1 || true)"
 [[ -n "$URL" ]] || die "未在 Release 中找到 macOS 安装包"
 
-TAG_SHOW="$(basename "${URL%/download/*}")"
+# URL 形如 …/releases/download/<TAG>/<file>，从地址里取真实 TAG（比 basename 整段可靠）
+TAG_SHOW="$(basename "${URL%/*}")"
 info "目标版本：$TAG_SHOW"
 info "下载地址：$URL"
 
@@ -58,6 +59,19 @@ trap 'rm -rf "$TMP"' EXIT
 
 info "下载中 …"
 curl -fL --progress-bar -o "$TMP/app.zip" "$URL" || die "下载失败，请检查网络后重试"
+
+# ---------- 3.5 SHA256 校验（Release 附带 SHA256SUMS.txt，防损坏/篡改） ----------
+SUMS_URL="${URL%/*}/SHA256SUMS.txt"
+if curl -fsSL -o "$TMP/SHA256SUMS.txt" "$SUMS_URL" 2>/dev/null; then
+  info "校验 SHA256 …"
+  WANT="$(grep " $(basename "$URL")\$" "$TMP/SHA256SUMS.txt" | awk '{print $1}' | head -1)"
+  GOT="$(shasum -a 256 "$TMP/app.zip" | awk '{print $1}')"
+  [[ -n "$WANT" ]] || die "校验文件里找不到 $(basename "$URL") 的 SHA256"
+  [[ "$WANT" == "$GOT" ]] || die "SHA256 校验失败（下载不完整或被篡改），请重试"
+  info "SHA256 校验通过"
+else
+  warn "该 Release 未提供 SHA256SUMS.txt，跳过校验"
+fi
 
 EXTRACT="$TMP/extract"
 mkdir -p "$EXTRACT"
