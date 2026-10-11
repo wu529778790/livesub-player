@@ -43,6 +43,7 @@ struct ModelSpec {
 }
 
 /// llama.cpp 预编译版固定 tag：含 llama-server 的 macOS arm64 构建。
+#[cfg(target_os = "macos")]
 const LLAMA_CPP_RELEASE: &str =
     "https://github.com/ggml-org/llama.cpp/releases/download/b11552/llama-b11552-bin-macos-arm64.tar.gz";
 #[cfg(target_os = "windows")]

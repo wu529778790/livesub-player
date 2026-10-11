@@ -117,7 +117,7 @@ pub fn run() {
             #[cfg(target_os = "windows")]
             {
                 let handle = app.handle().clone();
-                app.on_window_event(move |_window, event| {
+                app.on_window_event(move |event| {
                     if matches!(event, tauri::WindowEvent::Resized(_)) {
                         player::on_parent_resized(&handle);
                     }
