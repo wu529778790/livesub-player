@@ -278,12 +278,15 @@ fn run_session_inner(
         let mut samples = vec![0f32; WINDOW_SAMPLES];
         let mut last_text = String::new();
         let mut repeat_count = 0usize;
-        // 语言：设置里强制指定则整段钉住（跳过检测）；否则首窗自动检测后钉住
-        let mut detected_lang: Option<String> =
+        // 语言：设置里强制指定则整段钉住（跳过检测）；
+        // 自动模式每窗独立检测——跟随内容切换，混语种片源（如片尾英文歌 + 日文对白）
+        // 不再被首窗钉死而把日语硬翻成英文（实测 bug）
+        let detected_lang: Option<String> =
             crate::settings::read("asr_language").filter(|l| !l.is_empty() && l != "auto");
         if detected_lang.is_some() {
             log::info!("[asr] 使用指定识别语言: {}", detected_lang.clone().unwrap_or_default());
         }
+        let mut last_seen_lang: Option<String> = None;
 
         loop {
             // 窗口间轮询：seek / 换片 / 关停
@@ -401,14 +404,20 @@ fn run_session_inner(
                 window_idx += 1;
                 continue;
             }
-            // 首窗后钉住检测到的语言
+            // 自动模式：每窗独立检测语言（whisper 窗口内自判），仅在语言切换时记日志；
+            // 字幕库 lang 字段记首次检测值，仅作元数据
             if detected_lang.is_none() {
                 if let Ok(id) = state.full_lang_id_from_state() {
                     if let Some(code) = whisper_rs::get_lang_str(id) {
-                        log::info!("[asr] 检测语言: {code}");
-                        detected_lang = Some(code.to_string());
-                        if let Some(t) = &ts {
-                            t.t.lock().unwrap().lang = detected_lang.clone();
+                        if last_seen_lang.as_deref() != Some(code) {
+                            log::info!("[asr] 检测语言: {code}（窗 {window_idx}）");
+                            last_seen_lang = Some(code.to_string());
+                            if let Some(t) = &ts {
+                                let mut t = t.t.lock().unwrap();
+                                if t.lang.is_none() {
+                                    t.lang = Some(code.to_string());
+                                }
+                            }
                         }
                     }
                 }
@@ -507,9 +516,10 @@ fn make_params<'a>(lang: Option<&'a str>, n_threads: i32) -> FullParams<'a, 'a> 
             }
         }
         None => {
-            // 首窗：自动检测
+            // language 置空 = whisper.cpp 每窗自动检测语言并按检测语言转写（跟随内容切换）。
+            // 千万别设 detect_language(true)：那是「只测语言」模式，whisper.cpp 检测完
+            // 直接 return 0，整窗零转写输出（whisper.cpp src/whisper.cpp:5356-5370）
             params.set_language(None);
-            params.set_detect_language(true);
         }
     }
     params.set_no_speech_thold(0.6);
@@ -881,8 +891,10 @@ fn process_range(
     let mut audio_end = start;
     let mut last_text = String::new();
     let mut repeat_count = 0usize;
-    let mut detected_lang: Option<String> =
+    let detected_lang: Option<String> =
         crate::settings::read("asr_language").filter(|l| !l.is_empty() && l != "auto");
+    // 自动模式每窗独立检测（与实时会话一致），仅在语言切换时记日志
+    let mut last_seen_lang: Option<String> = None;
     let t0 = Instant::now();
     log::info!("[asr] 补全区间 [{start:.1} – {end:.1}]s（{mode_label}）");
 
@@ -981,12 +993,18 @@ fn process_range(
             idx += 1;
             continue;
         }
+        // 自动模式：每窗独立检测语言（跟随内容切换）
         if detected_lang.is_none() {
             if let Ok(id) = state.full_lang_id_from_state() {
                 if let Some(code) = whisper_rs::get_lang_str(id) {
-                    log::info!("[asr] 补全检测语言: {code}");
-                    detected_lang = Some(code.to_string());
-                    ts.t.lock().unwrap().lang = detected_lang.clone();
+                    if last_seen_lang.as_deref() != Some(code) {
+                        log::info!("[asr] 补全检测语言: {code}（窗 {idx}）");
+                        last_seen_lang = Some(code.to_string());
+                        let mut t = ts.t.lock().unwrap();
+                        if t.lang.is_none() {
+                            t.lang = Some(code.to_string());
+                        }
+                    }
                 }
             }
         }
