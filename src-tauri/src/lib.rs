@@ -30,7 +30,10 @@ pub fn run() {
                 .timezone_strategy(tauri_plugin_log::TimezoneStrategy::UseLocal)
                 .targets([
                     tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
-                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                    // 日志放 ~/.livesub-player/logs：不用 app_log_dir（目录名以 .app 结尾，
+                    // macOS 会把它当应用包，Finder 里双击/打开都报“已损坏或不完整”）
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Folder {
+                        path: settings::log_dir(),
                         file_name: Some("livesub-player".into()),
                     }),
                     tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Webview),
@@ -82,16 +85,11 @@ pub fn run() {
             update::cmd_install_update,
         ])
         .setup(|app| {
-            use tauri::Manager;
-
             // 每份日志开头自述：版本 + 日志目录（用户把日志发来即可定位）
             log::info!(
                 "LiveSub-Player v{} 启动（日志目录：{}）",
                 app.package_info().version,
-                app.path()
-                    .app_log_dir()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|_| "未知".into()),
+                settings::log_dir().display(),
             );
 
             // macOS 菜单栏 = 命令中心（文件/播放/字幕），点击统一转发前端分发；

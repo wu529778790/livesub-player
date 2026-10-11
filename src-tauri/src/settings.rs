@@ -20,6 +20,13 @@ pub fn data_dir() -> PathBuf {
     new_dir
 }
 
+/// 日志目录：~/.livesub-player/logs。
+/// 特意不用 app_log_dir()（~/Library/Logs/com.livesubplayer.app）——
+/// 目录名以 .app 结尾时 macOS 会把它当应用包：open/Finder 双击都报“已损坏或不完整”，根本进不去。
+pub fn log_dir() -> PathBuf {
+    data_dir().join("logs")
+}
+
 pub fn settings_file() -> PathBuf {
     data_dir().join("settings.json")
 }
@@ -75,13 +82,27 @@ pub fn cmd_set_setting(key: String, value: String) -> Result<(), String> {
     write(&key, &value)
 }
 
-/// 打开日志目录（设置页「打开日志文件夹」入口，排查 bug 用）
+/// 打开日志目录（设置页「打开日志文件夹」入口，排查 bug 用）。
+/// 旧版日志在 app_log_dir（目录名以 .app 结尾，Finder 里无法进入），点按钮时顺手迁移到新目录。
 #[tauri::command]
 pub fn cmd_open_log_dir(app: tauri::AppHandle) -> Result<(), String> {
     use tauri::Manager;
-    let dir = app.path().app_log_dir().map_err(|e| e.to_string())?;
+    let dir = log_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    reveal(&dir.display().to_string())?;
+    if let Ok(old) = app.path().app_log_dir() {
+        if let Ok(entries) = std::fs::read_dir(&old) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.extension().is_some_and(|x| x == "log") {
+                    let dest = dir.join(e.file_name());
+                    if !dest.exists() {
+                        let _ = std::fs::rename(&p, &dest);
+                    }
+                }
+            }
+        }
+    }
+    reveal(&dir.display().to_string(), false)?;
     log::info!("[settings] 打开日志目录: {}", dir.display());
     Ok(())
 }
@@ -97,19 +118,43 @@ pub fn cmd_open_url(url: String) -> Result<(), String> {
     if !ALLOWED.contains(&url.as_str()) {
         return Err(format!("不允许打开链接: {url}"));
     }
-    reveal(&url)?;
+    reveal(&url, true)?;
     log::info!("[settings] 打开链接: {url}");
     Ok(())
 }
 
-/// 跨平台调系统默认方式打开目录/URL
-fn reveal(target: &str) -> Result<(), String> {
+/// 跨平台调系统默认方式打开目录/URL，等待退出并检查状态（失败返回真实错误，不静默）。
+/// 注意：macOS 上 open 的目标路径末段不能以 .app 结尾，否则会被当作应用包启动（见 log_dir 注释）。
+#[cfg_attr(target_os = "macos", allow(unused_variables))]
+fn reveal(target: &str, is_url: bool) -> Result<(), String> {
     #[cfg(target_os = "macos")]
-    let r = std::process::Command::new("open").arg(target).spawn();
+    let mut cmd = {
+        let mut c = std::process::Command::new("/usr/bin/open");
+        c.arg(target);
+        c
+    };
     #[cfg(target_os = "windows")]
-    let r = std::process::Command::new("explorer").arg(target).spawn();
+    let mut cmd = if is_url {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "start"]).arg(target);
+        c
+    } else {
+        let mut c = std::process::Command::new("explorer");
+        c.arg(target);
+        c
+    };
     #[cfg(target_os = "linux")]
-    let r = std::process::Command::new("xdg-open").arg(target).spawn();
-    r.map_err(|e| e.to_string())?;
+    let mut cmd = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(target);
+        c
+    };
+    let st = cmd.status().map_err(|e| e.to_string())?;
+    if !st.success() {
+        return Err(format!(
+            "系统打开失败（exit {}）：{target}",
+            st.code().unwrap_or(-1)
+        ));
+    }
     Ok(())
 }
