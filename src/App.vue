@@ -285,10 +285,20 @@
       <div v-if="toast" class="osd">{{ toast }}</div>
     </main>
 
-    <!-- 控制栏 -->
+    <!-- 控制栏：布局对齐标准播放器惯例（IINA/PotPlayer）——
+         左：播放/快退/快进 ｜中：时间+进度 ｜右：倍速/音量/工具。
+         图标语义：环形箭头+数字 = 跳转秒数（双三角留给「上一曲/下一曲」， playlist 接入前不用） -->
     <footer v-if="loaded" class="controls">
-      <button class="ctl-btn" title="播放 / 暂停（空格）" @click="togglePause">{{ paused ? "▶" : "⏸" }}</button>
-      <button class="ctl-btn" title="快退 10s（键盘 ← 为 5s）" @click="seekBy(-10)">⏪</button>
+      <button class="ctl-btn" :title="paused ? '播放（空格）' : '暂停（空格）'" aria-label="播放或暂停" @click="togglePause">
+        <svg v-if="paused" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>
+        <svg v-else viewBox="0 0 24 24"><path d="M6 5h4v14H6zM14 5h4v14h-4z" /></svg>
+      </button>
+      <button class="ctl-btn" title="快退 10s（键盘 ← 为 5s）" aria-label="快退 10 秒" @click="seekBy(-10)">
+        <svg viewBox="0 0 24 24"><path d="M12 5V1L7 6l5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z" /><text x="12" y="16.5" text-anchor="middle" font-size="9.5" font-weight="700" fill="currentColor" stroke="none">10</text></svg>
+      </button>
+      <button class="ctl-btn" title="快进 10s（键盘 → 为 5s）" aria-label="快进 10 秒" @click="seekBy(10)">
+        <svg viewBox="0 0 24 24"><path d="M12 5V1l5 5-5 5V7c-3.31 0-6 2.69-6 6s2.69 6 6 6 6-2.69 6-6h2c0 4.42-3.58 8-8 8s-8-3.58-8-8 3.58-8 8-8z" /><text x="12" y="16.5" text-anchor="middle" font-size="9.5" font-weight="700" fill="currentColor" stroke="none">10</text></svg>
+      </button>
       <span class="time">{{ fmtTime(displayTime) }}</span>
       <div
         ref="barRef"
@@ -328,19 +338,28 @@
           </div>
         </div>
       </div>
-      <span class="vol-label">音量</span>
+      <button class="ctl-btn" :title="volume === 0 ? '取消静音' : '静音'" :aria-label="volume === 0 ? '取消静音' : '静音'" @click="toggleMute">
+        <svg v-if="volume === 0" viewBox="0 0 24 24"><path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51A8.8 8.8 0 0 0 21 12c0-4.28-2.99-7.86-6.99-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3 3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06a8.99 8.99 0 0 0 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4 9.91 6.09 12 8.18V4z" /></svg>
+        <svg v-else viewBox="0 0 24 24"><path d="M3 10v4h4l5 5V5L7 10H3zm13.5 2c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4-.91 7-4.49 7-8.77s-3-7.86-7-8.77z" /></svg>
+      </button>
       <input
         class="vol"
         type="range"
         min="0"
         max="100"
         :value="volume"
+        aria-label="音量"
         @input="changeVolume"
       />
-      <span class="vol-num">{{ Math.round(volume) }}</span>
-      <button class="ctl-btn" title="截图到桌面（S）" @click="screenshot">📷</button>
-      <button class="ctl-btn" title="导出全片字幕 SRT（E）" @click="exportSubs">📄</button>
-      <button class="ctl-btn" title="全屏（F）" @click="toggleFullscreen">⛶</button>
+      <button class="ctl-btn" title="截图到桌面（S）" aria-label="截图" @click="screenshot">
+        <svg viewBox="0 0 24 24" fill-rule="evenodd"><path d="M9 3 7.17 5H4a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-3.17L15 3H9zm3 4.5a4.5 4.5 0 1 1 0 9 4.5 4.5 0 0 1 0-9zm0 2a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z" /></svg>
+      </button>
+      <button class="ctl-btn" title="导出全片字幕 SRT（E）" aria-label="导出字幕" @click="exportSubs">
+        <svg viewBox="0 0 24 24"><path d="M20 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2zM4 12h4v2H4v-2zm10 6H4v-2h10v2zm6 0h-4v-2h4v2zm0-4H10v-2h10v2z" /></svg>
+      </button>
+      <button class="ctl-btn" title="全屏（F）" aria-label="全屏" @click="toggleFullscreen">
+        <svg viewBox="0 0 24 24"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z" /></svg>
+      </button>
     </footer>
 
     <!-- 右键菜单 -->
@@ -1208,6 +1227,17 @@ async function changeVolumeTo(v: number) {
   persistVolumeDebounced();
 }
 
+// 喇叭图标点按 = 静音/恢复（标准播放器惯例；滚轮/滑杆仍直接调值）
+let lastVolume = 100;
+function toggleMute() {
+  if (volume.value > 0) {
+    lastVolume = volume.value;
+    void changeVolumeTo(0);
+  } else {
+    void changeVolumeTo(lastVolume || 100);
+  }
+}
+
 function fmtTime(t: number): string {
   if (!Number.isFinite(t)) return "0:00";
   const s = Math.floor(t % 60);
@@ -1858,9 +1888,24 @@ onMounted(async () => {
   border: none;
   background: transparent;
   color: #fff;
-  font-size: 16px;
   cursor: pointer;
   padding: 4px 6px;
+  display: flex;
+  align-items: center;
+  transition: color 0.12s;
+}
+
+/* 单色 SVG 图标（与顶栏风格一致；emoji 已弃用——跨平台渲染不一致且语义混乱） */
+.ctl-btn svg {
+  width: 18px;
+  height: 18px;
+  fill: currentColor;
+  display: block;
+  pointer-events: none; /* 命中整个按钮，避免 SVG 吞事件 */
+}
+
+.ctl-btn:hover {
+  color: #ffd479;
 }
 
 .time {
@@ -2107,19 +2152,9 @@ onMounted(async () => {
   cursor: none;
 }
 
-.vol-label {
-  font-size: 12px;
-  color: #9a9aa5;
-}
-
+/* 音量：品牌琥珀滑杆（accent-color 覆盖 macOS 默认浅蓝，深色 UI 上更协调） */
 .vol {
-  width: 90px;
-}
-
-.vol-num {
-  font-size: 12px;
-  color: #cfcfd8;
-  width: 26px;
-  font-variant-numeric: tabular-nums;
+  width: 84px;
+  accent-color: #ffd479;
 }
 </style>
