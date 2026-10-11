@@ -85,6 +85,11 @@ pub fn run() {
             update::cmd_install_update,
         ])
         .setup(|app| {
+            // 任意线程 panic 落日志（尤其 mt 翻译 worker：静默死会让「译文生成中」永远挂起）
+            std::panic::set_hook(Box::new(|info| {
+                log::error!("[panic] {info}");
+            }));
+
             // 每份日志开头自述：版本 + 日志目录（用户把日志发来即可定位）
             log::info!(
                 "LiveSub-Player v{} 启动（日志目录：{}）",

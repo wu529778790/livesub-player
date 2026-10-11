@@ -503,6 +503,13 @@ fn ensure_server(app: &AppHandle) -> Result<u16, String> {
 
     let port = pick_port().ok_or("找不到可用端口")?;
     log::info!("[mt] 拉起 llama-server :{port}（{}）", model.display());
+    // stderr 落盘：引擎崩溃原因（dyld 缺库/参数错/模型坏）全在这里，不能丢弃
+    let stderr_path = crate::settings::log_dir().join("llama-server.log");
+    let stderr_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&stderr_path)
+        .ok();
     let child = std::process::Command::new(&engine)
         .args([
             "-m",
@@ -517,16 +524,17 @@ fn ensure_server(app: &AppHandle) -> Result<u16, String> {
             "4",
         ])
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(stderr_file.map(std::process::Stdio::from).unwrap_or(std::process::Stdio::null()))
         .spawn()
         .map_err(|e| format!("llama-server 启动失败: {e}"))?;
     *st.child.lock().unwrap() = Some(child);
     *SERVER_PORT.lock().unwrap() = Some(port);
 
-    // 健康检查：最多 60s（模型首次加载可能较久）
+    // 健康检查：模型首次加载可能较久，但整体有硬时限；进程死了立即快速失败
     let health = format!("http://127.0.0.1:{port}/health");
-    for _ in 0..200 {
-        if let Ok(resp) = ureq::get(&health).timeout(Duration::from_millis(1500)).call() {
+    let deadline = std::time::Instant::now() + Duration::from_secs(90);
+    while std::time::Instant::now() < deadline {
+        if let Ok(resp) = ureq::get(&health).timeout(Duration::from_millis(800)).call() {
             if resp.status() == 200 {
                 log::info!("[mt] llama-server 就绪 :{port}");
                 return Ok(port);
@@ -534,14 +542,20 @@ fn ensure_server(app: &AppHandle) -> Result<u16, String> {
         }
         // 若进程已死，快速失败
         if let Some(c) = st.child.lock().unwrap().as_mut() {
-            if let Ok(Some(_)) = c.try_wait() {
+            if let Ok(Some(status)) = c.try_wait() {
                 *st.child.lock().unwrap() = None;
-                return Err("llama-server 启动后退出（模型或参数问题）".into());
+                *SERVER_PORT.lock().unwrap() = None;
+                return Err(format!(
+                    "llama-server 启动即退出（{status}），原因见 logs/llama-server.log"
+                ));
             }
         }
         std::thread::sleep(Duration::from_millis(300));
     }
-    Err("llama-server 健康检查超时".into())
+    // 超时路径也要清句柄：否则下次 ensure_server 误认为服务在跑
+    *st.child.lock().unwrap() = None;
+    *SERVER_PORT.lock().unwrap() = None;
+    Err("llama-server 健康检查超时（90s），原因见 logs/llama-server.log".into())
 }
 
 /// llama-server 查找链：应用内下载的引擎优先，其次 Homebrew（开发环境）

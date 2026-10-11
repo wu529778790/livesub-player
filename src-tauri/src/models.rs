@@ -6,7 +6,7 @@
 //! 失败自动重试、流式写盘、进度事件。
 
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -135,8 +135,13 @@ pub fn cmd_model_status() -> Result<Vec<ModelStatus>, String> {
     let mut out = Vec::new();
     for name in KNOWN_MODELS {
         let Some(spec) = spec(name) else { continue };
-        // 引擎的「已装」看解压后的二进制（压缩包下载完即删）
-        let installed_path = if spec.member.is_some() { engine_bin() } else { dir.join(spec.dest) };
+        // 引擎的「已装」看有效性（主程序 + 依赖 dylib 齐全；压缩包下载完即删）
+        let (installed_path, installed) = if spec.member.is_some() {
+            (engine_bin(), engine_valid())
+        } else {
+            let p = dir.join(spec.dest);
+            (p.clone(), p.is_file())
+        };
         let size_mb = installed_path
             .metadata()
             .map(|m| m.len() as f64 / 1048576.0)
@@ -144,7 +149,7 @@ pub fn cmd_model_status() -> Result<Vec<ModelStatus>, String> {
         out.push(ModelStatus {
             name: name.to_string(),
             desc: spec.desc.to_string(),
-            installed: installed_path.is_file(),
+            installed,
             size_mb: (size_mb * 10.0).round() / 10.0,
         });
     }
@@ -250,16 +255,16 @@ pub fn cmd_model_download(app: AppHandle, name: String) -> Result<(), String> {
 
         match outcome {
             Some(DlOutcome::Done) => {
-                // 引擎：从 tar.gz 解出 llama-server 到 bin/，随后删包
-                if let Some(member) = spec.member {
+                // 引擎：tar.gz 内是扁平目录（主程序 + 全部依赖 dylib），整体解到 bin/
+                if spec.member.is_some() {
                     let bin = engine_bin();
                     let extract = (|| -> Result<(), String> {
                         if let Some(parent) = bin.parent() {
                             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
                         }
-                        extract_member_tar_gz(&dest, member, &bin)?;
+                        extract_engine_pack(&dest, bin.parent().expect("bin 必有父目录"))?;
                         let _ = std::fs::remove_file(&dest);
-                        log::info!("[models] 引擎已解压到 {}", bin.display());
+                        log::info!("[models] 引擎已解压到 {}（含全部依赖 dylib）", bin.display());
                         Ok(())
                     })();
                     if let Err(e) = extract {
@@ -326,29 +331,64 @@ pub fn cmd_model_cancel(app: AppHandle) -> Result<(), String> {
 }
 
 /// 从 tar.gz 解出指定文件名的成员（llama.cpp release 包内路径带版本前缀，按 basename 匹配）
-fn extract_member_tar_gz(archive: &PathBuf, member: &str, out: &PathBuf) -> Result<(), String> {
+/// 引擎包（llama.cpp macOS release）是扁平目录：llama-server 主程序 + 全部依赖 dylib。
+/// 新版 llama.cpp 的 llama-server 是动态链接的薄启动器（~49KB），
+/// 只解主程序会缺 libllama-server-impl.dylib，启动即被 dyld 杀死（2026-10-12 实锤）。
+/// 因此必须把包内所有文件都解到 bin/ 下（扁平结构，rpath 按 @loader_path 解析）。
+fn extract_engine_pack(archive: &Path, out_dir: &Path) -> Result<(), String> {
     let f = std::fs::File::open(archive).map_err(|e| format!("打开压缩包失败: {e}"))?;
     let gz = flate2::read::GzDecoder::new(f);
     let mut tar = tar::Archive::new(gz);
+    std::fs::create_dir_all(out_dir).map_err(|e| e.to_string())?;
+    let mut extracted = 0usize;
     for entry in tar.entries().map_err(|e| format!("读取压缩包失败: {e}"))? {
         let mut entry = entry.map_err(|e| e.to_string())?;
-        if !entry.header().entry_type().is_file() {
+        let name = entry.path().map_err(|e| e.to_string())?;
+        let Some(fname) = name.file_name() else { continue };
+        let out = out_dir.join(fname);
+        let et = entry.header().entry_type();
+        // dylib 包用「无版本号软链 → 版本号真文件」布局（libllama-common.0.dylib →
+        // libllama-common.0.6.0.dylib），软链漏解 = 主程序 dyld 找不到库启动即死
+        if et.is_symlink() {
+            let Some(target) = entry.link_name().map_err(|e| e.to_string())? else { continue };
+            let _ = std::fs::remove_file(&out);
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&target, &out).map_err(|e| format!("创建软链失败: {e}"))?;
             continue;
         }
-        let name = entry.path().map_err(|e| e.to_string())?;
-        if name.file_name().and_then(|s| s.to_str()) == Some(member) {
-            let mut out_f = std::fs::File::create(out).map_err(|e| e.to_string())?;
-            std::io::copy(&mut entry, &mut out_f).map_err(|e| format!("解压失败: {e}"))?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(out, std::fs::Permissions::from_mode(0o755))
-                    .map_err(|e| e.to_string())?;
-            }
-            return Ok(());
+        if !et.is_file() {
+            continue;
         }
+        let mut out_f = std::fs::File::create(&out).map_err(|e| format!("解压失败: {e}"))?;
+        std::io::copy(&mut entry, &mut out_f).map_err(|e| format!("解压失败: {e}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = entry.header().mode().unwrap_or(0o755);
+            std::fs::set_permissions(&out, std::fs::Permissions::from_mode(mode | 0o755))
+                .map_err(|e| e.to_string())?;
+        }
+        extracted += 1;
     }
-    Err(format!("压缩包内未找到 {member}"))
+    if extracted == 0 {
+        return Err("压缩包内没有文件".into());
+    }
+    engine_valid_or_err(out_dir)
+}
+
+/// 引擎可用的判定：主程序 + 其依赖 dylib 都在（旧版只解主程序的安装视为未装，触发重下）
+pub fn engine_valid() -> bool {
+    let bin = engine_bin();
+    bin.is_file() && bin.with_file_name("libllama-server-impl.dylib").is_file()
+}
+
+fn engine_valid_or_err(dir: &Path) -> Result<(), String> {
+    let bin = dir.join("llama-server");
+    if bin.is_file() && bin.with_file_name("libllama-server-impl.dylib").is_file() {
+        Ok(())
+    } else {
+        Err("引擎包不完整（缺少 llama-server 或其依赖 dylib）".into())
+    }
 }
 
 fn download(app: &AppHandle, name: &str, url: &str, dest: &PathBuf) -> Result<DlOutcome, String> {
