@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>LiveSub-Player — 打开视频，字幕跟上</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23e5484d'/%3E%3Cpath d='M12 9.5v13l11-6.5z' fill='white'/%3E%3C/svg%3E" />
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 824 824'%3E%3Cdefs%3E%3ClinearGradient id='bg' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0' stop-color='%23241e2e'/%3E%3Cstop offset='1' stop-color='%23110f16'/%3E%3C/linearGradient%3E%3ClinearGradient id='amber' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0' stop-color='%23ffe3a1'/%3E%3Cstop offset='1' stop-color='%23f2b544'/%3E%3C/linearGradient%3E%3CradialGradient id='glow' cx='0.5' cy='0.34' r='0.6'%3E%3Cstop offset='0' stop-color='%23ffd479' stop-opacity='0.16'/%3E%3Cstop offset='1' stop-color='%23ffd479' stop-opacity='0'/%3E%3C/radialGradient%3E%3C/defs%3E%3Crect width='824' height='824' rx='185' fill='url(%23bg)'/%3E%3Crect width='824' height='824' rx='185' fill='url(%23glow)'/%3E%3Crect x='1.5' y='1.5' width='821' height='821' rx='183.5' fill='none' stroke='%23ffffff' stroke-opacity='0.08' stroke-width='3'/%3E%3Crect x='252' y='200' width='320' height='320' rx='84' fill='url(%23amber)'/%3E%3Cpath d='M366 286 L498 360 L366 434 Z' fill='%231b1520'/%3E%3Crect x='282' y='560' width='260' height='32' rx='16' fill='%23ffffff' fill-opacity='0.88'/%3E%3Crect x='327' y='608' width='170' height='32' rx='16' fill='%23ffd479'/%3E%3C/svg%3E" />
 <meta name="description" content="跨平台桌面播放器：whisper 实时语音识别生成双语字幕，在线/本地混合翻译，安装包不到 30 MB，全离线兜底。" />
 <style>
   :root {
@@ -42,12 +42,7 @@
   }
   .nav-inner { display: flex; align-items: center; gap: 28px; height: 62px; }
   .logo { display: flex; align-items: center; gap: 9px; font-weight: 800; font-size: 17px; letter-spacing: 0.3px; }
-  .logo-mark {
-    width: 26px; height: 26px; border-radius: 7px;
-    background: linear-gradient(135deg, var(--accent), #f07a45);
-    color: #fff; display: inline-flex; align-items: center; justify-content: center;
-    font-size: 12px; font-weight: 800;
-  }
+  .logo-mark { width: 26px; height: 26px; display: block; }
   .nav-links { display: flex; gap: 26px; font-size: 14px; color: var(--muted); margin-left: auto; }
   .nav-links a:hover { color: var(--text); }
   .nav-cta {
@@ -218,7 +213,30 @@
 
 <nav>
   <div class="wrap nav-inner">
-    <a class="logo" href="#"><span class="logo-mark">▶</span>LiveSub</a>
+    <a class="logo" href="#">
+      <svg class="logo-mark" viewBox="0 0 824 824" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <defs>
+          <linearGradient id="logoBg" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#241e2e" />
+            <stop offset="1" stop-color="#110f16" />
+          </linearGradient>
+          <linearGradient id="logoAmber" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#ffe3a1" />
+            <stop offset="1" stop-color="#f2b544" />
+          </linearGradient>
+          <radialGradient id="logoGlow" cx="0.5" cy="0.34" r="0.6">
+            <stop offset="0" stop-color="#ffd479" stop-opacity="0.16" />
+            <stop offset="1" stop-color="#ffd479" stop-opacity="0" />
+          </radialGradient>
+        </defs>
+        <rect width="824" height="824" rx="185" fill="url(#logoBg)" />
+        <rect width="824" height="824" rx="185" fill="url(#logoGlow)" />
+        <rect x="1.5" y="1.5" width="821" height="821" rx="183.5" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="3" />
+        <rect x="252" y="200" width="320" height="320" rx="84" fill="url(#logoAmber)" />
+        <path d="M366 286 L498 360 L366 434 Z" fill="#1b1520" />
+        <rect x="282" y="560" width="260" height="32" rx="16" fill="#ffffff" fill-opacity="0.88" />
+        <rect x="327" y="608" width="170" height="32" rx="16" fill="#ffd479" />
+      </svg>LiveSub</a>
     <div class="nav-links">
       <a href="#features">特性</a>
       <a href="#how">工作原理</a>
