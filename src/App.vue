@@ -906,6 +906,12 @@ onMounted(async () => {
     lastProg = null;
     needLocalModel.value = false;
     await refreshModelStatus();
+    // 档位切换等待下载完成：模型就位后自动应用
+    if (pendingTierSwitch && e.payload.name === pendingTierSwitch) {
+      const tier = pendingTierSwitch;
+      pendingTierSwitch = null;
+      await applyTier(tier);
+    }
     // 识别模型首次就绪：后台无感下载完成，告知用户核心功能可用
     if (e.payload.name === "whisper-base" && !recognitionWasReady) {
       showToast("字幕功能已就绪，拖入视频即可");
@@ -1074,13 +1080,35 @@ async function removeModel(name: string) {
   showToast(`${modelNameText(name)}已删除`);
 }
 
+// 档位切换若指向未下载的模型：先排队下载，完成后在 models://done 里自动切换
+let pendingTierSwitch: string | null = null;
+
 async function changeWhisperModel(e: Event) {
   const v = (e.target as HTMLSelectElement).value;
-  whisperModel.value = v;
-  await invoke("cmd_set_setting", { key: "whisper_model", value: v }).catch((e) =>
-    showError(String(e))
-  );
-  showToast("识别档位已保存，重启应用后生效");
+  if (v === whisperModel.value) return;
+  const installed =
+    modelStatus.value.find((m) => m.name === (v === "small" ? "whisper-small" : "whisper-base"))
+      ?.installed ?? false;
+  if (!installed) {
+    pendingTierSwitch = v;
+    showToast(`正在下载${v === "small" ? "均衡（466MB）" : "快速（142MB）"}档，完成后自动切换`);
+    enqueueDownload([v === "small" ? "whisper-small" : "whisper-base"]);
+    return;
+  }
+  await applyTier(v);
+}
+
+async function applyTier(v: string) {
+  const ok = await invoke("cmd_asr_set_model", { tier: v })
+    .then(() => true)
+    .catch((e) => {
+      showError(String(e));
+      return false;
+    });
+  if (ok) {
+    whisperModel.value = v;
+    showToast(`识别档位已切换：${v === "small" ? "均衡（466MB）" : "快速（142MB）"}，立即生效`);
+  }
 }
 
 function modelNameText(name: string): string {

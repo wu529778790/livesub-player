@@ -77,6 +77,7 @@ pub fn run() {
             asr::cmd_export_full_srt,
             asr::cmd_cancel_export,
             asr::cmd_check_ffmpeg,
+            asr::cmd_asr_set_model,
             update::cmd_check_update,
             update::cmd_install_update,
         ])

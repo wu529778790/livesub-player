@@ -164,18 +164,23 @@ fn send(app: &AppHandle, msg: Msg) {
 }
 
 // ---------- 共享 whisper 上下文 ----------
-// 实时会话与全片补全共用一份模型（模型只加载一次；旧实现导出要再加载第二份）。
-// 档位切换沿用旧行为：重启应用生效。
-static SHARED_CTX: Mutex<Option<Arc<WhisperContext>>> = Mutex::new(None);
+// 实时会话与全片补全共用一份模型（旧实现导出要再加载第二份）。
+// 缓存带模型路径：识别档位切换后（cmd_asr_set_model 重置缓存），
+// 下一次会话自动加载新档模型，立即生效不重启。
+static SHARED_CTX: Mutex<Option<(PathBuf, Arc<WhisperContext>)>> = Mutex::new(None);
 
 fn get_ctx() -> Result<Arc<WhisperContext>, String> {
-    let mut slot = SHARED_CTX.lock().unwrap();
-    if let Some(c) = slot.as_ref() {
-        return Ok(c.clone());
+    let model_path = find_model().ok_or_else(|| {
+        "未找到识别模型：请在 设置 → 识别·翻译 中下载语音识别模型".to_string()
+    })?;
+    {
+        let slot = SHARED_CTX.lock().unwrap();
+        if let Some((loaded_path, c)) = slot.as_ref() {
+            if loaded_path == &model_path {
+                return Ok(c.clone());
+            }
+        }
     }
-    let Some(model_path) = find_model() else {
-        return Err("未找到识别模型：请在 设置 → 识别·翻译 中下载语音识别模型".into());
-    };
     let t0 = Instant::now();
     let ctx = WhisperContext::new_with_params(
         &model_path.to_string_lossy(),
@@ -188,39 +193,40 @@ fn get_ctx() -> Result<Arc<WhisperContext>, String> {
         model_path.display()
     );
     let arc = Arc::new(ctx);
-    *slot = Some(arc.clone());
+    *SHARED_CTX.lock().unwrap() = Some((model_path, arc.clone()));
     Ok(arc)
 }
 
 // ---------- worker ----------
 fn worker(app: AppHandle, rx: Receiver<Msg>) {
-    let ctx = match get_ctx() {
-        Ok(c) => c,
-        Err(e) => {
-            // 关键：把 tx 槽位清空——否则模型下载完成后，后续 Start/Seek 仍发进
-            // 这个已死的通道被静默丢弃，用户必须重启应用才能恢复识别
-            *app.state::<AsrState>().tx.lock().unwrap() = None;
-            let _ = app.emit("asr://error", e);
-            log::error!("[asr] 模型缺失，识别管线不启动");
-            return;
-        }
-    };
-
     while let Ok(msg) = rx.recv() {
         match msg {
             Msg::Shutdown => break,
             Msg::StopSession => {
                 // 会话运行中会在窗口间隙的 poll 里收到并自行退出；空闲时无事可做
             }
-            Msg::Start { path, pos } => run_session(&app, &ctx, &rx, &path, pos),
+            Msg::Start { path, pos } => match get_ctx() {
+                Ok(c) => run_session(&app, &c, &rx, &path, pos),
+                Err(e) => handle_model_error(&app, e),
+            },
             Msg::Seek { pos } => {
                 let path = app.state::<AsrState>().current_path.lock().unwrap().clone();
                 if !path.is_empty() {
-                    run_session(&app, &ctx, &rx, &path, pos);
+                    match get_ctx() {
+                        Ok(c) => run_session(&app, &c, &rx, &path, pos),
+                        Err(e) => handle_model_error(&app, e),
+                    }
                 }
             }
         }
     }
+}
+
+/// 模型不可用：清空 tx 槽位（下载完成后下一次 Start 会重建 worker），并通知前端
+fn handle_model_error(app: &AppHandle, e: String) {
+    *app.state::<AsrState>().tx.lock().unwrap() = None;
+    let _ = app.emit("asr://error", e);
+    log::error!("[asr] 模型缺失，识别管线暂停（模型就绪后自动恢复）");
 }
 
 /// 会话生命周期包裹：存活标记供后台补全判断「实时是否还在处理」
@@ -634,6 +640,28 @@ pub fn ffmpeg_ok() -> bool {
         return true;
     }
     std::process::Command::new("ffmpeg").arg("-version").output().is_ok()
+}
+
+/// 切换识别档位并立即生效：写设置 + 丢弃共享上下文 + 当前会话从播放位置用新模型接续
+#[tauri::command]
+pub fn cmd_asr_set_model(app: AppHandle, tier: String) -> Result<(), String> {
+    if !matches!(tier.as_str(), "base" | "small") {
+        return Err(format!("未知识别档位: {tier}"));
+    }
+    crate::settings::write("whisper_model", &tier)?;
+    // 所选档位模型必须已下载（前端负责先触发下载，完成后才调用本命令）
+    if find_model().is_none() {
+        return Err("该档位模型尚未下载完成".into());
+    }
+    // 丢弃旧上下文：下一次会话（含下方的接续 seek）自动加载新档模型
+    *SHARED_CTX.lock().unwrap() = None;
+    let st = app.state::<AsrState>();
+    if !st.current_path.lock().unwrap().is_empty() {
+        // 有视频在播：从当前播放位置用新模型接续识别（已识别区间走字幕库秒过）
+        on_seek(&app, playback_pos(&app));
+    }
+    log::info!("[asr] 识别档位切换为 {tier}，立即生效");
+    Ok(())
 }
 
 #[tauri::command]
