@@ -420,6 +420,7 @@ fn extract_engine_pack(archive: &Path, out_dir: &Path) -> Result<(), String> {
         // dylib 包用「无版本号软链 → 版本号真文件」布局（libllama-common.0.dylib →
         // libllama-common.0.6.0.dylib），软链漏解 = 主程序 dyld 找不到库启动即死
         if et.is_symlink() {
+            #[allow(unused_variables)] // target 仅 unix 软链分支使用
             let Some(target) = entry.link_name().map_err(|e| e.to_string())? else { continue };
             let _ = std::fs::remove_file(&out);
             #[cfg(unix)]
