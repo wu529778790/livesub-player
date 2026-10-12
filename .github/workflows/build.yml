@@ -48,3 +48,15 @@ jobs:
 
       - name: 构建（debug，验证可编译可打包）
         run: npm run tauri -- build --debug --bundles ${{ matrix.bundles }}
+
+      # debug 包挂到 Actions artifacts（默认保留 90 天），供各平台装机实测；
+      # NSIS 安装包 / macOS app 包 / deb 包都在 bundle 目录下
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: livesub-${{ matrix.os }}
+          path: |
+            src-tauri/target/debug/bundle/nsis/*.exe
+            src-tauri/target/debug/bundle/macos/*.app/**
+            src-tauri/target/debug/bundle/deb/*.deb
+          if-no-files-found: error
